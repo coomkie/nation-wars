@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nation Wars — Battle Overlay</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+      }
+      #app {
+        width: 1920px;
+        height: 1080px;
+        position: relative;
+      }
+      /* Full canvas stage (HUD area included). Default white. */
+      #stage-bg {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 1920px;
+        height: 1080px;
+        background: #ffffff;
+        pointer-events: none;
+        z-index: 0;
+      }
+      #stage-bg-img {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        object-position: center center;
+        display: none;
+      }
+      /* Arena band only — matches Pixi map rect y=200 h=680 */
+      #arena-bg {
+        position: absolute;
+        left: 0;
+        top: 200px;
+        width: 1920px;
+        height: 680px;
+        object-fit: cover;
+        object-position: center center;
+        display: none;
+        pointer-events: none;
+        z-index: 0;
+      }
+      #app canvas {
+        position: relative;
+        z-index: 1;
+        display: block;
+      }
+      #audio-unlock-hint {
+        position: absolute;
+        left: 50%;
+        bottom: 24px;
+        transform: translateX(-50%);
+        z-index: 2;
+        padding: 8px 14px;
+        border-radius: 8px;
+        background: rgba(15, 23, 42, 0.85);
+        color: #f8fafc;
+        font: 600 14px/1.3 system-ui, sans-serif;
+        pointer-events: auto;
+        cursor: pointer;
+        letter-spacing: 0.02em;
+        user-select: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="stage-bg"><img id="stage-bg-img" alt="" /></div>
+      <img id="arena-bg" alt="" />
+      <div id="audio-unlock-hint">Click to enable audio</div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

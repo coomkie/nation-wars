@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nation Wars — Admin</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <header class="top">
+      <h1>Nation Wars Live</h1>
+      <nav>
+        <button data-page="nations" class="nav active">Nations</button>
+        <button data-page="unit-types" class="nav">Unit Types</button>
+        <button data-page="bracket" class="nav">Bracket</button>
+        <button data-page="match" class="nav">Match</button>
+        <button data-page="tiktok" class="nav">TikTok</button>
+      </nav>
+      <label class="pw">
+        Admin password
+        <input id="adminPassword" type="password" placeholder="changeme" />
+      </label>
+    </header>
+
+    <main>
+      <section id="page-nations" class="page active">
+        <h2>Nations</h2>
+        <form id="nationForm" class="card">
+          <input name="name" placeholder="Nation name" required />
+          <input name="flagUrl" placeholder="Flag URL (optional if uploading)" />
+          <input name="flag" type="file" accept="image/*" />
+          <button type="submit">Create nation</button>
+        </form>
+        <div id="nationList" class="grid"></div>
+      </section>
+
+      <section id="page-unit-types" class="page">
+        <h2>Unit Types</h2>
+        <p class="muted">
+          Sprite URLs / anim keys are slots for future assets. Leave blank to use placeholder shapes on the overlay.
+        </p>
+        <form id="unitTypeForm" class="card stack">
+          <input type="hidden" name="id" value="" />
+          <div class="row wrap">
+            <input name="name" placeholder="Name (e.g. Archer)" required />
+            <input name="spriteKey" placeholder="spriteKey" />
+            <select name="attackRange">
+              <option value="melee">melee</option>
+              <option value="ranged">ranged</option>
+            </select>
+          </div>
+          <div class="row wrap">
+            <label>HP <input name="baseHp" type="number" value="100" min="1" /></label>
+            <label>DMG <input name="baseAttackDamage" type="number" value="10" min="0" step="0.1" /></label>
+            <label>Atk/s <input name="attackSpeed" type="number" value="1" min="0.1" step="0.05" /></label>
+            <label>Move <input name="moveSpeed" type="number" value="40" min="1" /></label>
+            <label>Range <input name="attackRangeValue" type="number" value="40" min="1" /></label>
+            <label>Detect <input name="detectionRange" type="number" value="80" min="1" /></label>
+            <label>Scale <input name="scale" type="number" value="1" min="0.1" max="5" step="0.05" /></label>
+          </div>
+          <div class="row wrap">
+            <label><input name="isSplash" type="checkbox" /> Splash / AoE</label>
+            <label>Splash r <input name="splashRadius" type="number" value="90" min="0" /></label>
+            <label>AoE DMG <input name="aoeDamage" type="number" value="0" min="0" step="0.1" title="0 = 55% of DMG" /></label>
+            <label>Stun % <input name="stunChance" type="number" value="0" min="0" max="1" step="0.05" /></label>
+            <label>Stun sec <input name="stunDuration" type="number" value="0" min="0" step="0.1" /></label>
+            <label>Knockback <input name="knockbackForce" type="number" value="0" min="0" /></label>
+          </div>
+          <div class="row wrap">
+            <label>Stun resist <input name="stunResist" type="number" value="0" min="0" max="1" step="0.05" title="0–1 (1 = immune)" /></label>
+            <label>KB resist <input name="knockbackResist" type="number" value="0" min="0" max="1" step="0.05" title="0–1 (1 = immune)" /></label>
+            <label>Blocking <input name="blocking" type="number" value="0" min="0" max="1" step="0.05" title="Reduce ranged damage 0–1" /></label>
+          </div>
+          <div class="row wrap">
+            <input name="spriteUrl" placeholder="Static sprite URL (optional; prefer sprites/ folder)" />
+          </div>
+          <div class="row wrap">
+            <button type="submit" id="unitTypeSubmitBtn">Create unit type</button>
+            <button type="button" id="unitTypeCancelEdit" class="danger" hidden>Cancel edit</button>
+          </div>
+        </form>
+        <div id="unitTypeList" class="grid"></div>
+      </section>
+
+      <section id="page-bracket" class="page">
+        <h2>Tournament Bracket</h2>
+        <p class="muted">
+          Select nations then create a bracket. New nations cannot join an in-progress tournament.
+        </p>
+        <div class="card">
+          <div id="bracketNationPick" class="checks"></div>
+          <div class="row">
+            <button id="createBracketBtn">Create bracket</button>
+            <button id="archiveBracketBtn" class="danger">Archive active bracket</button>
+            <a href="http://localhost:5174" target="_blank" rel="noreferrer">Open bracket overlay</a>
+          </div>
+        </div>
+        <pre id="bracketView" class="code"></pre>
+      </section>
+
+      <section id="page-match" class="page">
+        <h2>Match Setup</h2>
+        <form id="matchForm" class="card stack">
+          <label>
+            Bracket node ID (optional)
+            <input name="bracketNodeId" placeholder="Leave empty for freestyle match" />
+          </label>
+          <label>
+            Nation A
+            <select name="nationAId" required></select>
+          </label>
+          <label>
+            Nation B
+            <select name="nationBId" required></select>
+          </label>
+          <label>
+            Default nation (unmapped gifts)
+            <select name="defaultNationId" required></select>
+          </label>
+          <label>
+            Default unit type
+            <select name="defaultUnitTypeId" id="defaultUnitTypeSelect" required></select>
+          </label>
+          <label>
+            Base max HP
+            <input name="baseMaxHp" type="number" min="1" value="1000" />
+          </label>
+          <div class="row wrap">
+            <label>
+              Base attack range
+              <input name="baseAttackRange" type="number" min="0" value="220" />
+            </label>
+            <label>
+              Base attack damage
+              <input name="baseAttackDamage" type="number" min="0" value="8" />
+            </label>
+            <label>
+              Base attack speed (per sec)
+              <input name="baseAttackSpeed" type="number" min="0" step="0.1" value="0.5" />
+            </label>
+          </div>
+          <label>
+            Duration (minutes)
+            <input name="durationMinutes" type="number" min="1" value="15" />
+          </label>
+          <label>
+            Intermission after match (seconds)
+            <input name="intermissionSeconds" type="number" min="0" value="20" />
+          </label>
+          <div class="card stack" style="margin: 0; padding: 0; border: none; box-shadow: none">
+            <strong>Stage background</strong>
+            <p class="muted" style="margin: 0">
+              Full 1920×1080 backdrop behind HUD. Default = white. PNG/JPG/WebP/GIF.
+            </p>
+            <img
+              id="stageBgPreview"
+              alt="Stage preview"
+              style="max-width: 320px; max-height: 120px; object-fit: cover; display: none; border-radius: 6px; background: #fff"
+            />
+            <div class="row wrap">
+              <input id="stageBgFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" />
+              <button type="button" id="stageBgUploadBtn">Upload stage</button>
+              <button type="button" id="stageBgClearBtn" class="danger">Clear</button>
+            </div>
+          </div>
+          <div class="card stack" style="margin: 0; padding: 0; border: none; box-shadow: none">
+            <strong>Arena (battlefield) image</strong>
+            <p class="muted" style="margin: 0">
+              Only the map band (between bases). Default = blue/red tint. Does not cover timer/scores.
+            </p>
+            <img
+              id="battlefieldBgPreview"
+              alt="Arena preview"
+              style="max-width: 320px; max-height: 120px; object-fit: cover; display: none; border-radius: 6px"
+            />
+            <div class="row wrap">
+              <input id="battlefieldBgFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" />
+              <button type="button" id="battlefieldBgUploadBtn">Upload arena</button>
+              <button type="button" id="battlefieldBgClearBtn" class="danger">Clear</button>
+            </div>
+          </div>
+          <label>
+            Gift → nation mappings (optional JSON)
+            <textarea
+              name="giftMappings"
+              rows="3"
+              placeholder='[{"giftId":5655,"giftName":"Rose","nationId":"..."}]'
+            ></textarea>
+          </label>
+          <label>
+            Gift → unit type mappings (optional JSON)
+            <textarea
+              name="giftUnitTypeMappings"
+              rows="3"
+              placeholder='[{"giftId":5655,"giftName":"Rose","unitTypeId":"..."}]'
+            ></textarea>
+          </label>
+          <button type="submit">Start match</button>
+        </form>
+        <div class="row">
+          <button id="endMatchBtn" class="danger">End match now</button>
+          <button id="nextMatchBtn">Start next bracket match</button>
+          <button id="resetMatchBtn">Reset to idle</button>
+          <a href="http://localhost:5173" target="_blank" rel="noreferrer">Open battle overlay</a>
+        </div>
+        <h3>Mock gift (offline test)</h3>
+        <form id="mockGiftForm" class="card row wrap">
+          <input name="username" placeholder="viewer_user" required />
+          <input name="displayName" placeholder="Display Name" />
+          <select name="nationId" id="mockNationSelect" required>
+            <option value="">Select nation…</option>
+          </select>
+          <select name="unitTypeId" id="mockUnitTypeSelect">
+            <option value="">Default unit type</option>
+          </select>
+          <input name="giftId" type="number" value="5655" required />
+          <input name="giftName" value="Rose" required />
+          <input name="diamondCount" type="number" value="1" min="1" required />
+          <input name="repeatCount" type="number" value="1" min="1" />
+          <button type="submit">Send mock gift</button>
+          <button type="button" id="randomGiftBtn">Random user gift (1–10)</button>
+        </form>
+        <pre id="matchView" class="code"></pre>
+      </section>
+
+      <section id="page-tiktok" class="page">
+        <h2>TikTok Connection</h2>
+        <form id="tiktokForm" class="card row">
+          <input name="username" placeholder="tiktok_username (no @)" required />
+          <button type="submit">Connect</button>
+          <button type="button" id="tiktokDisconnect" class="danger">Disconnect</button>
+        </form>
+        <pre id="tiktokStatus" class="code"></pre>
+      </section>
+    </main>
+
+    <div id="toast"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

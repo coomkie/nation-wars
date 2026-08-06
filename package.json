@@ -1,0 +1,11 @@
+{
+  "name": "nation-wars-live",
+  "private": true,
+  "scripts": {
+    "dev:backend": "npm run start:dev --prefix backend",
+    "dev:battle": "npm run dev --prefix battle-overlay",
+    "dev:bracket": "npm run dev --prefix bracket-overlay",
+    "dev:admin": "npm run dev --prefix admin-ui",
+    "build:all": "npm run build --prefix backend && npm run build --prefix battle-overlay && npm run build --prefix bracket-overlay && npm run build --prefix admin-ui"
+  }
+}

@@ -9,6 +9,51 @@ import { Repository } from 'typeorm';
 import { UnitTypeEntity } from './unit-type.entity';
 import { CreateUnitTypeDto, UpdateUnitTypeDto } from './dto/unit-type.dto';
 
+const BEHAVIOR_KEYS: (keyof UpdateUnitTypeDto)[] = [
+  'spriteKey',
+  'spriteUrl',
+  'animIdleKey',
+  'animWalkKey',
+  'animAttackKey',
+  'animDeathKey',
+  'baseHp',
+  'baseAttackDamage',
+  'attackSpeed',
+  'moveSpeed',
+  'attackRange',
+  'attackRangeValue',
+  'detectionRange',
+  'isSplash',
+  'splashRadius',
+  'stunChance',
+  'stunDuration',
+  'knockbackForce',
+  'stunResist',
+  'knockbackResist',
+  'aoeDamage',
+  'damageTakenMods',
+  'lifesteal',
+  'scale',
+  'maxActivePerNation',
+  'stationary',
+  'dealsDamage',
+  'onDeathAoe',
+  'auraRadius',
+  'auraInterval',
+  'auraDamagePerTick',
+  'auraSlowPct',
+  'auraStunChance',
+  'auraStunDuration',
+  'trailSlowPct',
+  'trailDuration',
+  'trailInterval',
+  'canMolt',
+  'cocoonHp',
+  'cocoonDurationSec',
+  'moltFormUnitTypeId',
+  'cocoonSpriteKey',
+];
+
 @Injectable()
 export class UnitTypeService implements OnModuleInit {
   constructor(
@@ -58,7 +103,6 @@ export class UnitTypeService implements OnModuleInit {
         await this.ensureExtraUnitTypes();
       }
     } catch (err: any) {
-      // Don't crash boot if another process holds the SQLite lock (e.g. DB Browser)
       console.warn(
         `[UnitTypeService] seed/migrate skipped: ${err?.message ?? err}`,
       );
@@ -128,7 +172,6 @@ export class UnitTypeService implements OnModuleInit {
     await this.repo.save(defaults.map((d) => this.repo.create(d)));
   }
 
-  /** Newer unit types added after initial seed */
   private extraUnitTypeDefs(): Partial<UnitTypeEntity>[] {
     return [
       {
@@ -195,7 +238,6 @@ export class UnitTypeService implements OnModuleInit {
         splashRadius: null,
         stunResist: 0.2,
         knockbackResist: 0.3,
-        blocking: 0.35,
         scale: 1,
       },
     ];
@@ -252,8 +294,27 @@ export class UnitTypeService implements OnModuleInit {
       stunResist: dto.stunResist ?? 0,
       knockbackResist: dto.knockbackResist ?? 0,
       aoeDamage: dto.aoeDamage ?? 0,
-      blocking: dto.blocking ?? 0,
+      damageTakenMods: dto.damageTakenMods ?? {},
+      lifesteal: dto.lifesteal ?? 0,
       scale: dto.scale ?? 1,
+      maxActivePerNation: dto.maxActivePerNation ?? 0,
+      stationary: dto.stationary ?? false,
+      dealsDamage: dto.dealsDamage ?? true,
+      onDeathAoe: dto.onDeathAoe ?? false,
+      auraRadius: dto.auraRadius ?? 0,
+      auraInterval: dto.auraInterval ?? 1,
+      auraDamagePerTick: dto.auraDamagePerTick ?? 0,
+      auraSlowPct: dto.auraSlowPct ?? 0,
+      auraStunChance: dto.auraStunChance ?? 0,
+      auraStunDuration: dto.auraStunDuration ?? 0,
+      trailSlowPct: dto.trailSlowPct ?? 0,
+      trailDuration: dto.trailDuration ?? 0,
+      trailInterval: dto.trailInterval ?? 0,
+      canMolt: dto.canMolt ?? false,
+      cocoonHp: dto.cocoonHp ?? 0,
+      cocoonDurationSec: dto.cocoonDurationSec ?? 5,
+      moltFormUnitTypeId: dto.moltFormUnitTypeId ?? null,
+      cocoonSpriteKey: dto.cocoonSpriteKey ?? null,
     });
     return this.repo.save(row);
   }
@@ -267,32 +328,7 @@ export class UnitTypeService implements OnModuleInit {
       }
       row.name = dto.name;
     }
-    const assignable: (keyof UpdateUnitTypeDto)[] = [
-      'spriteKey',
-      'spriteUrl',
-      'animIdleKey',
-      'animWalkKey',
-      'animAttackKey',
-      'animDeathKey',
-      'baseHp',
-      'baseAttackDamage',
-      'attackSpeed',
-      'moveSpeed',
-      'attackRange',
-      'attackRangeValue',
-      'detectionRange',
-      'isSplash',
-      'splashRadius',
-      'stunChance',
-      'stunDuration',
-      'knockbackForce',
-      'stunResist',
-      'knockbackResist',
-      'aoeDamage',
-      'blocking',
-      'scale',
-    ];
-    for (const key of assignable) {
+    for (const key of BEHAVIOR_KEYS) {
       if (dto[key] !== undefined) {
         (row as any)[key] = dto[key];
       }
@@ -323,8 +359,27 @@ export class UnitTypeService implements OnModuleInit {
       stunResist: type.stunResist ?? 0,
       knockbackResist: type.knockbackResist ?? 0,
       aoeDamage: type.aoeDamage ?? 0,
-      blocking: type.blocking ?? 0,
+      damageTakenMods: { ...(type.damageTakenMods ?? {}) },
+      lifesteal: type.lifesteal ?? 0,
       scale: type.scale ?? 1,
+      maxActivePerNation: type.maxActivePerNation ?? 0,
+      stationary: type.stationary ?? false,
+      dealsDamage: type.dealsDamage ?? true,
+      onDeathAoe: type.onDeathAoe ?? false,
+      auraRadius: type.auraRadius ?? 0,
+      auraInterval: type.auraInterval ?? 1,
+      auraDamagePerTick: type.auraDamagePerTick ?? 0,
+      auraSlowPct: type.auraSlowPct ?? 0,
+      auraStunChance: type.auraStunChance ?? 0,
+      auraStunDuration: type.auraStunDuration ?? 0,
+      trailSlowPct: type.trailSlowPct ?? 0,
+      trailDuration: type.trailDuration ?? 0,
+      trailInterval: type.trailInterval ?? 0,
+      canMolt: type.canMolt ?? false,
+      cocoonHp: type.cocoonHp ?? 0,
+      cocoonDurationSec: type.cocoonDurationSec ?? 5,
+      moltFormUnitTypeId: type.moltFormUnitTypeId ?? null,
+      cocoonSpriteKey: type.cocoonSpriteKey ?? null,
     };
   }
 }

@@ -56,6 +56,7 @@ async function bootstrap() {
   socket.on('unit:damaged', (payload) => scene.onUnitDamaged(payload));
   socket.on('unit:died', (payload) => scene.onUnitDied(payload));
   socket.on('unit:state', (payload) => scene.onUnitState(payload));
+  socket.on('unit:molted', (payload) => scene.onUnitMolted(payload));
   socket.on('fx:projectile', (payload) => scene.onProjectile(payload));
   socket.on('fx:explosion', (payload) => scene.onExplosion(payload));
   socket.on('base:damaged', (payload) => scene.onBaseDamaged(payload));

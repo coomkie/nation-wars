@@ -188,13 +188,22 @@ export class AudioManager {
     return `unit:${slug}:die`;
   }
 
+  /** Per-unit: /audio/sfx/units/{spriteKey}_spawn.mp3 */
+  private unitSpawnKey(slug: string): SoundKey {
+    return `unit:${slug}:spawn`;
+  }
+
   private ensureUnitSfx(
     slug: string,
-    action: 'attack' | 'die',
+    action: 'attack' | 'die' | 'spawn',
   ): Promise<boolean> {
     if (!slug) return Promise.resolve(false);
     const id =
-      action === 'attack' ? this.unitAttackKey(slug) : this.unitDieKey(slug);
+      action === 'attack'
+        ? this.unitAttackKey(slug)
+        : action === 'die'
+          ? this.unitDieKey(slug)
+          : this.unitSpawnKey(slug);
     if (this.ready.has(id)) return Promise.resolve(true);
     if (this.failed.has(id)) return Promise.resolve(false);
     const base = `/audio/sfx/units/${slug}_${action}`;
@@ -313,6 +322,30 @@ export class AudioManager {
     void this.ensureUnitSfx(slug, 'attack').then((ok) => {
       if (ok) this.play(this.unitAttackKey(slug));
       else fallback();
+    });
+  }
+
+  /**
+   * Spawn SFX priority:
+   * 1) sfx/units/{spriteKey}_spawn.mp3
+   * 2) unit_spawn
+   */
+  playUnitSpawn(spriteKey?: string) {
+    const slug = unitSlug(spriteKey);
+    const throttleKey = slug ? `spawn:${slug}` : 'spawn:generic';
+    const now = performance.now();
+    const until = this.throttleUntil.get(throttleKey) ?? 0;
+    if (now < until) return;
+    this.throttleUntil.set(throttleKey, now + 50);
+
+    if (!slug) {
+      this.play('unit_spawn');
+      return;
+    }
+
+    void this.ensureUnitSfx(slug, 'spawn').then((ok) => {
+      if (ok) this.play(this.unitSpawnKey(slug));
+      else this.play('unit_spawn');
     });
   }
 

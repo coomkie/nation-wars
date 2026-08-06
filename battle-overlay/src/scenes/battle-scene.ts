@@ -629,7 +629,7 @@ export class BattleScene {
 
   onUnitSpawned(payload: { nationId: string; unit: UnitDto }) {
     this.spawnView(payload.unit);
-    this.audio.play('unit_spawn', 80);
+    this.audio.playUnitSpawn(payload.unit.spriteKey);
   }
 
   onUnitsMoved(payload: {
@@ -675,6 +675,31 @@ export class BattleScene {
     if (view.attackPlaying && payload.state !== 'dead') return;
     const want = clipForUnitState(payload.state, payload.state === 'advancing');
     void this.setUnitAnim(view, want, want !== 'dead');
+  }
+
+  /** Cocoon sprite swap or form-2 emerge — refresh identity + size + idle/run */
+  onUnitMolted(payload: { unit: UnitDto }) {
+    const u = payload.unit;
+    const view = this.unitViews.get(u.id);
+    if (!view || view.dying) return;
+    const prevKey = view.data.spriteKey;
+    view.data = { ...view.data, ...u };
+    this.redrawHp(view);
+    this.redrawBody(view);
+    if (prevKey !== u.spriteKey) {
+      view.usesDirectional = false;
+      view.animClip = null;
+      view.animTextures = [];
+      if (view.sprite) {
+        view.sprite.destroy();
+        view.sprite = null;
+      }
+      view.body.visible = true;
+      void this.bootstrapUnitAnim(view);
+    } else {
+      const want = clipForUnitState(u.state, u.state === 'advancing');
+      void this.setUnitAnim(view, want, want !== 'dead');
+    }
   }
 
   onUnitDamaged(payload: { unitId: string; hp: number; maxHp: number }) {

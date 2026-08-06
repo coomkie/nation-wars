@@ -2,7 +2,57 @@ export type UnitState =
   | 'advancing'
   | 'engaging'
   | 'attacking_base'
+  | 'cocooning'
   | 'dead';
+
+export interface BattlefieldZone {
+  id: string;
+  nationId: string;
+  x: number;
+  y: number;
+  radius: number;
+  slowPct: number;
+  /** Epoch ms */
+  expiresAt: number;
+}
+
+/** Snapshot of form-2 stats baked at spawn (sync transform in combat tick) */
+export interface MoltFormSnapshot {
+  unitTypeId: string;
+  unitTypeName: string;
+  spriteKey: string;
+  maxHp: number;
+  attackDamage: number;
+  attackSpeed: number;
+  moveSpeed: number;
+  attackRange: 'melee' | 'ranged';
+  attackRangeValue: number;
+  detectionRange: number;
+  isSplash: boolean;
+  splashRadius: number | null;
+  stunChance: number;
+  stunDuration: number;
+  knockbackForce: number;
+  stunResist: number;
+  knockbackResist: number;
+  aoeDamage: number;
+  damageTakenMods: Record<string, number>;
+  lifesteal: number;
+  scale: number;
+  maxActivePerNation: number;
+  stationary: boolean;
+  dealsDamage: boolean;
+  onDeathAoe: boolean;
+  auraRadius: number;
+  auraInterval: number;
+  auraDamagePerTick: number;
+  auraSlowPct: number;
+  auraStunChance: number;
+  auraStunDuration: number;
+  trailSlowPct: number;
+  trailDuration: number;
+  trailInterval: number;
+}
 
 export interface Unit {
   id: string;
@@ -35,10 +85,34 @@ export interface Unit {
   knockbackResist: number;
   /** Flat AoE/splash damage to secondary targets */
   aoeDamage: number;
-  /** 0–1: reduce incoming ranged damage */
-  blocking: number;
+  /** attacker unitTypeId → damage-taken modifier (+0.4 = 140%) */
+  damageTakenMods: Record<string, number>;
+  /** Fraction of damage dealt healed (may exceed 1) */
+  lifesteal: number;
   /** Display size multiplier on overlay (default 1) */
   scale: number;
+  maxActivePerNation: number;
+  stationary: boolean;
+  dealsDamage: boolean;
+  onDeathAoe: boolean;
+  auraRadius: number;
+  auraInterval: number;
+  auraDamagePerTick: number;
+  auraSlowPct: number;
+  auraStunChance: number;
+  auraStunDuration: number;
+  trailSlowPct: number;
+  trailDuration: number;
+  trailInterval: number;
+  canMolt: boolean;
+  cocoonHp: number;
+  cocoonDurationSec: number;
+  moltFormUnitTypeId: string | null;
+  cocoonSpriteKey: string | null;
+  /** Baked at spawn from moltFormUnitTypeId */
+  moltFormSnapshot: MoltFormSnapshot | null;
+  /** True after first cocoon (or if molt unavailable) */
+  hasMoltUsed: boolean;
   position: { x: number; y: number };
   state: UnitState;
   targetUnitId: string | null;
@@ -52,6 +126,16 @@ export interface Unit {
   attackImpactIn?: number;
   /** Server-only: seconds remaining stunned (cannot move/attack) */
   stunRemaining?: number;
+  /** Server-only: aura pulse cooldown */
+  auraCooldown?: number;
+  /** Server-only: trail drop cooldown */
+  trailCooldown?: number;
+  /** Server-only: current slow factor from aura/zones (0 = none) */
+  slowFactor?: number;
+  /** Server-only: seconds remaining for slowFactor */
+  slowRemaining?: number;
+  /** Server-only: cocoon timer remaining */
+  cocoonRemaining?: number;
 }
 
 export interface Base {
@@ -109,6 +193,8 @@ export interface MatchState {
   baseAttackRange: number;
   baseAttackDamage: number;
   baseAttackSpeed: number;
+  /** Ground zones (slime / rain trail) */
+  zones: BattlefieldZone[];
 }
 
 export interface GiftNationMapping {

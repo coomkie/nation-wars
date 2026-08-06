@@ -22,7 +22,26 @@ type UnitType = {
   stunResist?: number;
   knockbackResist?: number;
   aoeDamage?: number;
-  blocking?: number;
+  damageTakenMods?: Record<string, number>;
+  lifesteal?: number;
+  maxActivePerNation?: number;
+  stationary?: boolean;
+  dealsDamage?: boolean;
+  onDeathAoe?: boolean;
+  auraRadius?: number;
+  auraInterval?: number;
+  auraDamagePerTick?: number;
+  auraSlowPct?: number;
+  auraStunChance?: number;
+  auraStunDuration?: number;
+  trailSlowPct?: number;
+  trailDuration?: number;
+  trailInterval?: number;
+  canMolt?: boolean;
+  cocoonHp?: number;
+  cocoonDurationSec?: number;
+  moltFormUnitTypeId?: string | null;
+  cocoonSpriteKey?: string | null;
 };
 
 function password(): string {
@@ -158,6 +177,9 @@ function setUnitTypeFormMode(editing: UnitType | null) {
     idInput.value = '';
     submitBtn.textContent = 'Create unit type';
     cancelBtn.hidden = true;
+    (form.elements.namedItem('dealsDamage') as HTMLInputElement).checked = true;
+    renderDamageModRows({});
+    fillMoltFormSelect('');
     return;
   }
 
@@ -205,16 +227,123 @@ function setUnitTypeFormMode(editing: UnitType | null) {
   (form.elements.namedItem('aoeDamage') as HTMLInputElement).value = String(
     editing.aoeDamage ?? 0,
   );
-  (form.elements.namedItem('blocking') as HTMLInputElement).value = String(
-    editing.blocking ?? 0,
+  (form.elements.namedItem('lifestealPct') as HTMLInputElement).value = String(
+    Math.round((editing.lifesteal ?? 0) * 100),
   );
+  (form.elements.namedItem('stationary') as HTMLInputElement).checked =
+    !!editing.stationary;
+  (form.elements.namedItem('dealsDamage') as HTMLInputElement).checked =
+    editing.dealsDamage !== false;
+  (form.elements.namedItem('onDeathAoe') as HTMLInputElement).checked =
+    !!editing.onDeathAoe;
+  (form.elements.namedItem('maxActivePerNation') as HTMLInputElement).value =
+    String(editing.maxActivePerNation ?? 0);
+  (form.elements.namedItem('auraRadius') as HTMLInputElement).value = String(
+    editing.auraRadius ?? 0,
+  );
+  (form.elements.namedItem('auraInterval') as HTMLInputElement).value = String(
+    editing.auraInterval ?? 1,
+  );
+  (form.elements.namedItem('auraDamagePerTick') as HTMLInputElement).value =
+    String(editing.auraDamagePerTick ?? 0);
+  (form.elements.namedItem('auraSlowPct') as HTMLInputElement).value = String(
+    editing.auraSlowPct ?? 0,
+  );
+  (form.elements.namedItem('auraStunChance') as HTMLInputElement).value =
+    String(editing.auraStunChance ?? 0);
+  (form.elements.namedItem('auraStunDuration') as HTMLInputElement).value =
+    String(editing.auraStunDuration ?? 0);
+  (form.elements.namedItem('trailSlowPct') as HTMLInputElement).value = String(
+    editing.trailSlowPct ?? 0,
+  );
+  (form.elements.namedItem('trailDuration') as HTMLInputElement).value = String(
+    editing.trailDuration ?? 0,
+  );
+  (form.elements.namedItem('trailInterval') as HTMLInputElement).value = String(
+    editing.trailInterval ?? 0,
+  );
+  (form.elements.namedItem('canMolt') as HTMLInputElement).checked =
+    !!editing.canMolt;
+  (form.elements.namedItem('cocoonHp') as HTMLInputElement).value = String(
+    editing.cocoonHp ?? 80,
+  );
+  (form.elements.namedItem('cocoonDurationSec') as HTMLInputElement).value =
+    String(editing.cocoonDurationSec ?? 5);
+  (form.elements.namedItem('cocoonSpriteKey') as HTMLInputElement).value =
+    editing.cocoonSpriteKey || '';
+  fillMoltFormSelect(editing.moltFormUnitTypeId ?? '');
   (form.elements.namedItem('spriteUrl') as HTMLInputElement).value =
     editing.spriteUrl || '';
+
+  renderDamageModRows(editing.damageTakenMods ?? {});
 
   submitBtn.textContent = 'Update unit type';
   cancelBtn.hidden = false;
   form.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
+
+function unitTypeOptionsHtml(selectedId = '') {
+  return (
+    `<option value="">— pick unit type —</option>` +
+    unitTypes
+      .map(
+        (t) =>
+          `<option value="${t.id}" ${t.id === selectedId ? 'selected' : ''}>${escapeHtml(t.name)}</option>`,
+      )
+      .join('')
+  );
+}
+
+function renderDamageModRows(mods: Record<string, number>) {
+  const host = document.getElementById('damageModsList')!;
+  const entries = Object.entries(mods);
+  if (!entries.length) {
+    host.innerHTML = '';
+    addDamageModRow();
+    return;
+  }
+  host.innerHTML = '';
+  for (const [id, frac] of entries) {
+    addDamageModRow(id, Math.round(frac * 100));
+  }
+}
+
+function addDamageModRow(selectedId = '', pct = 0) {
+  const host = document.getElementById('damageModsList')!;
+  const row = document.createElement('div');
+  row.className = 'row wrap damage-mod-row';
+  row.style.gap = '8px';
+  row.innerHTML = `
+    <select data-mod-type>${unitTypeOptionsHtml(selectedId)}</select>
+    <label>% taken <input data-mod-pct type="number" value="${pct}" step="1" style="width:80px" /></label>
+    <button type="button" data-mod-remove class="danger">Remove</button>
+  `;
+  row.querySelector('[data-mod-remove]')!.addEventListener('click', () => {
+    row.remove();
+  });
+  host.appendChild(row);
+}
+
+function collectDamageTakenMods(): Record<string, number> {
+  const out: Record<string, number> = {};
+  document
+    .querySelectorAll<HTMLElement>('#damageModsList .damage-mod-row')
+    .forEach((row) => {
+      const id = (
+        row.querySelector('[data-mod-type]') as HTMLSelectElement
+      ).value;
+      const pct = Number(
+        (row.querySelector('[data-mod-pct]') as HTMLInputElement).value,
+      );
+      if (!id || !Number.isFinite(pct) || pct === 0) return;
+      out[id] = pct / 100;
+    });
+  return out;
+}
+
+document.getElementById('addDamageModBtn')!.addEventListener('click', () => {
+  addDamageModRow();
+});
 
 async function refreshUnitTypes() {
   unitTypes = await api('/unit-types');
@@ -229,7 +358,14 @@ async function refreshUnitTypes() {
         HP ${t.baseHp} · DMG ${t.baseAttackDamage} · Atk/s ${t.attackSpeed}<br/>
         Move ${t.moveSpeed} · Range ${t.attackRangeValue} · Detect ${t.detectionRange} · Scale ${t.scale ?? 1}<br/>
         ${t.isSplash ? `AoE r=${t.splashRadius ?? 0} dmg=${t.aoeDamage ?? 0} · ` : ''}Stun ${Math.round((t.stunChance ?? 0) * 100)}%/${t.stunDuration ?? 0}s · KB ${t.knockbackForce ?? 0}<br/>
-        Resist stun ${Math.round((t.stunResist ?? 0) * 100)}% · KB ${Math.round((t.knockbackResist ?? 0) * 100)}% · Block ${Math.round((t.blocking ?? 0) * 100)}%
+        Resist stun ${Math.round((t.stunResist ?? 0) * 100)}% · KB ${Math.round((t.knockbackResist ?? 0) * 100)}% · LS ${Math.round((t.lifesteal ?? 0) * 100)}%<br/>
+        ${t.stationary ? 'Stationary · ' : ''}${t.dealsDamage === false ? 'No atk dmg · ' : ''}${t.onDeathAoe ? 'Death AoE · ' : ''}${t.maxActivePerNation ? `Max×${t.maxActivePerNation} · ` : ''}${t.auraRadius ? `Aura r=${t.auraRadius}` : ''}${t.canMolt ? ` · Molt→${escapeHtml(unitTypes.find((u) => u.id === t.moltFormUnitTypeId)?.name ?? '?')} (${t.cocoonHp}HP/${t.cocoonDurationSec}s)` : ''}
+        ${Object.keys(t.damageTakenMods ?? {}).length ? `<br/>Dmg mods: ${Object.entries(t.damageTakenMods ?? {})
+          .map(([id, m]) => {
+            const n = unitTypes.find((u) => u.id === id)?.name ?? id.slice(0, 6);
+            return `${escapeHtml(n)} ${m >= 0 ? '+' : ''}${Math.round(m * 100)}%`;
+          })
+          .join(', ')}` : ''}
       </div>
       <div class="muted" style="font-size:10px;margin-top:4px">${t.id}</div>
       <div class="row" style="margin-top:8px;gap:8px">
@@ -267,6 +403,28 @@ async function refreshUnitTypes() {
   });
 
   fillUnitTypeSelects();
+  const editingId = (
+    document.querySelector(
+      '#unitTypeForm [name="id"]',
+    ) as HTMLInputElement | null
+  )?.value;
+  if (!editingId) renderDamageModRows({});
+}
+
+function fillMoltFormSelect(selectedId = '') {
+  const sel = document.getElementById(
+    'moltFormUnitTypeSelect',
+  ) as HTMLSelectElement | null;
+  if (!sel) return;
+  sel.innerHTML =
+    `<option value="">— none —</option>` +
+    unitTypes
+      .map(
+        (t) =>
+          `<option value="${t.id}">${escapeHtml(t.name)}</option>`,
+      )
+      .join('');
+  if (selectedId) sel.value = selectedId;
 }
 
 function fillUnitTypeSelects() {
@@ -289,6 +447,12 @@ function fillUnitTypeSelects() {
     mock.innerHTML =
       `<option value="">Default unit type</option>` + opts;
     if (prev) mock.value = prev;
+  }
+  const moltSel = document.getElementById(
+    'moltFormUnitTypeSelect',
+  ) as HTMLSelectElement | null;
+  if (moltSel) {
+    fillMoltFormSelect(moltSel.value);
   }
 }
 
@@ -379,7 +543,26 @@ document.getElementById('unitTypeForm')!.addEventListener('submit', async (e) =>
     stunResist: Number(fd.get('stunResist') || 0),
     knockbackResist: Number(fd.get('knockbackResist') || 0),
     aoeDamage: Number(fd.get('aoeDamage') || 0),
-    blocking: Number(fd.get('blocking') || 0),
+    lifesteal: Number(fd.get('lifestealPct') || 0) / 100,
+    damageTakenMods: collectDamageTakenMods(),
+    stationary: fd.get('stationary') === 'on',
+    dealsDamage: fd.get('dealsDamage') === 'on',
+    onDeathAoe: fd.get('onDeathAoe') === 'on',
+    maxActivePerNation: Number(fd.get('maxActivePerNation') || 0),
+    auraRadius: Number(fd.get('auraRadius') || 0),
+    auraInterval: Number(fd.get('auraInterval') || 1),
+    auraDamagePerTick: Number(fd.get('auraDamagePerTick') || 0),
+    auraSlowPct: Number(fd.get('auraSlowPct') || 0),
+    auraStunChance: Number(fd.get('auraStunChance') || 0),
+    auraStunDuration: Number(fd.get('auraStunDuration') || 0),
+    trailSlowPct: Number(fd.get('trailSlowPct') || 0),
+    trailDuration: Number(fd.get('trailDuration') || 0),
+    trailInterval: Number(fd.get('trailInterval') || 0),
+    canMolt: fd.get('canMolt') === 'on',
+    cocoonHp: Number(fd.get('cocoonHp') || 0),
+    cocoonDurationSec: Number(fd.get('cocoonDurationSec') || 5),
+    moltFormUnitTypeId: String(fd.get('moltFormUnitTypeId') || '').trim() || null,
+    cocoonSpriteKey: String(fd.get('cocoonSpriteKey') || '').trim() || null,
   };
   const spriteUrl = String(fd.get('spriteUrl') || '').trim();
   body.spriteUrl = spriteUrl || null;

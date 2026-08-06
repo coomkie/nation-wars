@@ -79,6 +79,11 @@ export class MatchGateway implements OnGatewayConnection {
     this.server?.emit('unit:state', payload);
   }
 
+  /** After cocoon → form 2 (full unit snapshot for overlay) */
+  emitUnitMolted(unit: Unit) {
+    this.server?.emit('unit:molted', { unit });
+  }
+
   emitProjectile(payload: {
     id: string;
     kind: 'arrow' | 'base';

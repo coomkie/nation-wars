@@ -197,6 +197,7 @@ export class MatchService implements OnModuleInit {
       baseAttackRange: this.defaults.baseAttackRange,
       baseAttackDamage: this.defaults.baseAttackDamage,
       baseAttackSpeed: this.defaults.baseAttackSpeed,
+      zones: [],
     };
   }
 
@@ -314,6 +315,7 @@ export class MatchService implements OnModuleInit {
       baseAttackRange: this.defaults.baseAttackRange,
       baseAttackDamage: this.defaults.baseAttackDamage,
       baseAttackSpeed: this.defaults.baseAttackSpeed,
+      zones: [],
     };
 
     if (bracketNodeId) {
@@ -374,6 +376,55 @@ export class MatchService implements OnModuleInit {
     const unitType = await this.unitTypes.findOne(unitTypeId);
     this.unitTypeCache.set(unitType.id, unitType);
 
+    let moltFormSnapshot: Unit['moltFormSnapshot'] = null;
+    if (unitType.canMolt && unitType.moltFormUnitTypeId) {
+      try {
+        const form2 = await this.unitTypes.findOne(unitType.moltFormUnitTypeId);
+        this.unitTypeCache.set(form2.id, form2);
+        const s = this.unitTypes.statsFor(form2);
+        moltFormSnapshot = {
+          unitTypeId: form2.id,
+          unitTypeName: form2.name,
+          spriteKey: form2.spriteKey,
+          maxHp: s.maxHp,
+          attackDamage: s.attackDamage,
+          attackSpeed: s.attackSpeed,
+          moveSpeed: s.moveSpeed,
+          attackRange: s.attackRange,
+          attackRangeValue: s.attackRangeValue,
+          detectionRange: s.detectionRange,
+          isSplash: s.isSplash,
+          splashRadius: s.splashRadius,
+          stunChance: s.stunChance,
+          stunDuration: s.stunDuration,
+          knockbackForce: s.knockbackForce,
+          stunResist: s.stunResist,
+          knockbackResist: s.knockbackResist,
+          aoeDamage: s.aoeDamage,
+          damageTakenMods: s.damageTakenMods,
+          lifesteal: s.lifesteal,
+          scale: s.scale,
+          maxActivePerNation: s.maxActivePerNation,
+          stationary: s.stationary,
+          dealsDamage: s.dealsDamage,
+          onDeathAoe: s.onDeathAoe,
+          auraRadius: s.auraRadius,
+          auraInterval: s.auraInterval,
+          auraDamagePerTick: s.auraDamagePerTick,
+          auraSlowPct: s.auraSlowPct,
+          auraStunChance: s.auraStunChance,
+          auraStunDuration: s.auraStunDuration,
+          trailSlowPct: s.trailSlowPct,
+          trailDuration: s.trailDuration,
+          trailInterval: s.trailInterval,
+        };
+      } catch {
+        this.logger.warn(
+          `Molt form ${unitType.moltFormUnitTypeId} missing for ${unitType.name}`,
+        );
+      }
+    }
+
     const count = Math.max(1, Math.floor(gift.repeatCount) || 1);
     const valuePerUnit = gift.diamondCount;
     const totalValue = valuePerUnit * count;
@@ -386,13 +437,24 @@ export class MatchService implements OnModuleInit {
     this.updateLeadTimestamps(prevA, prevB);
 
     // One unit per gift (repeatCount = combo/streak count) — no merge/heal
+    const maxActive = unitType.maxActivePerNation ?? 0;
     for (let i = 0; i < count; i++) {
+      if (maxActive > 0) {
+        const aliveSame = state.units.filter(
+          (u) =>
+            u.unitTypeId === unitType.id &&
+            u.state !== 'dead' &&
+            u.hp > 0,
+        ).length;
+        if (aliveSame >= maxActive) continue;
+      }
       const unit = this.createUnit(
         gift,
         nationId,
         unitType,
         valuePerUnit,
         side === 'A',
+        moltFormSnapshot,
       );
       state.units.push(unit);
       this.gateway.emitUnitSpawned(nationId, unit);
@@ -407,11 +469,14 @@ export class MatchService implements OnModuleInit {
     type: UnitTypeEntity,
     value: number,
     isA: boolean,
+    moltFormSnapshot: Unit['moltFormSnapshot'] = null,
   ): Unit {
     const stats = this.unitTypes.statsFor(type);
     const lane =
       BATTLEFIELD.laneMinY +
       Math.random() * (BATTLEFIELD.laneMaxY - BATTLEFIELD.laneMinY);
+    const canMolt =
+      !!(stats.canMolt && moltFormSnapshot && (stats.cocoonHp ?? 0) > 0);
     return {
       id: randomUUID(),
       username: gift.username,
@@ -437,8 +502,29 @@ export class MatchService implements OnModuleInit {
       stunResist: stats.stunResist ?? 0,
       knockbackResist: stats.knockbackResist ?? 0,
       aoeDamage: stats.aoeDamage ?? 0,
-      blocking: stats.blocking ?? 0,
+      damageTakenMods: stats.damageTakenMods ?? {},
+      lifesteal: stats.lifesteal ?? 0,
       scale: stats.scale ?? 1,
+      maxActivePerNation: stats.maxActivePerNation ?? 0,
+      stationary: stats.stationary ?? false,
+      dealsDamage: stats.dealsDamage ?? true,
+      onDeathAoe: stats.onDeathAoe ?? false,
+      auraRadius: stats.auraRadius ?? 0,
+      auraInterval: stats.auraInterval ?? 1,
+      auraDamagePerTick: stats.auraDamagePerTick ?? 0,
+      auraSlowPct: stats.auraSlowPct ?? 0,
+      auraStunChance: stats.auraStunChance ?? 0,
+      auraStunDuration: stats.auraStunDuration ?? 0,
+      trailSlowPct: stats.trailSlowPct ?? 0,
+      trailDuration: stats.trailDuration ?? 0,
+      trailInterval: stats.trailInterval ?? 0,
+      canMolt,
+      cocoonHp: stats.cocoonHp ?? 0,
+      cocoonDurationSec: stats.cocoonDurationSec ?? 5,
+      moltFormUnitTypeId: stats.moltFormUnitTypeId ?? null,
+      cocoonSpriteKey: stats.cocoonSpriteKey ?? null,
+      moltFormSnapshot: canMolt ? moltFormSnapshot : null,
+      hasMoltUsed: false,
       position: {
         x: isA ? BATTLEFIELD.spawnAX : BATTLEFIELD.spawnBX,
         y: lane,
@@ -449,6 +535,11 @@ export class MatchService implements OnModuleInit {
       attackCooldown: 0,
       attackImpactIn: 0,
       stunRemaining: 0,
+      auraCooldown: 0,
+      trailCooldown: 0,
+      slowFactor: 0,
+      slowRemaining: 0,
+      cocoonRemaining: 0,
     };
   }
 

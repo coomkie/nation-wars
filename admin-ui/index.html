@@ -69,7 +69,57 @@
           <div class="row wrap">
             <label>Stun resist <input name="stunResist" type="number" value="0" min="0" max="1" step="0.05" title="0–1 (1 = immune)" /></label>
             <label>KB resist <input name="knockbackResist" type="number" value="0" min="0" max="1" step="0.05" title="0–1 (1 = immune)" /></label>
-            <label>Blocking <input name="blocking" type="number" value="0" min="0" max="1" step="0.05" title="Reduce ranged damage 0–1" /></label>
+            <label>Lifesteal % <input name="lifestealPct" type="number" value="0" min="0" step="1" title="150 = heal 150% of damage dealt" /></label>
+          </div>
+          <div class="card stack" style="margin:0;padding:12px;border:1px solid #333">
+            <strong>Damage taken from unit types</strong>
+            <p class="muted" style="margin:0">
+              % modifier on damage received. +40 = take 140% from that type; −20 = take 80%.
+            </p>
+            <div id="damageModsList" class="stack" style="gap:6px"></div>
+            <button type="button" id="addDamageModBtn">+ Add modifier</button>
+          </div>
+          <div class="card stack" style="margin:0;padding:12px;border:1px solid #333">
+            <strong>Behavior (unique units)</strong>
+            <div class="row wrap">
+              <label><input name="stationary" type="checkbox" /> Stationary</label>
+              <label><input name="dealsDamage" type="checkbox" checked /> Deals damage</label>
+              <label><input name="onDeathAoe" type="checkbox" /> On-death AoE</label>
+              <label>Max active/nation <input name="maxActivePerNation" type="number" value="0" min="0" step="1" title="0 = unlimited; 1 = support cap" /></label>
+            </div>
+            <div class="row wrap">
+              <label>Aura r <input name="auraRadius" type="number" value="0" min="0" /></label>
+              <label>Aura interval s <input name="auraInterval" type="number" value="1" min="0.05" step="0.05" /></label>
+              <label>Aura DMG/tick <input name="auraDamagePerTick" type="number" value="0" min="0" step="0.1" /></label>
+              <label>Aura slow <input name="auraSlowPct" type="number" value="0" min="0" step="0.05" title="0.3 = 30% slower" /></label>
+              <label>Aura stun % <input name="auraStunChance" type="number" value="0" min="0" max="1" step="0.05" /></label>
+              <label>Aura stun s <input name="auraStunDuration" type="number" value="0" min="0" step="0.1" /></label>
+            </div>
+            <div class="row wrap">
+              <label>Trail slow <input name="trailSlowPct" type="number" value="0" min="0" step="0.05" /></label>
+              <label>Trail duration s <input name="trailDuration" type="number" value="0" min="0" step="0.1" /></label>
+              <label>Trail interval s <input name="trailInterval" type="number" value="0" min="0" step="0.1" /></label>
+            </div>
+          </div>
+          <div class="card stack" style="margin:0;padding:12px;border:1px solid #333">
+            <strong>Molt / Cicada (unique)</strong>
+            <p class="muted" style="margin:0">
+              First lethal hit → cocoon (fixed HP, immobile). If still alive after duration → become form 2 unit type.
+            </p>
+            <div class="row wrap">
+              <label><input name="canMolt" type="checkbox" /> Can molt</label>
+              <label>Cocoon HP <input name="cocoonHp" type="number" value="80" min="0" step="1" /></label>
+              <label>Cocoon sec <input name="cocoonDurationSec" type="number" value="5" min="0" step="0.1" /></label>
+            </div>
+            <div class="row wrap">
+              <label>
+                Form 2 unit type
+                <select name="moltFormUnitTypeId" id="moltFormUnitTypeSelect">
+                  <option value="">— none —</option>
+                </select>
+              </label>
+              <input name="cocoonSpriteKey" placeholder="cocoon spriteKey (optional)" />
+            </div>
           </div>
           <div class="row wrap">
             <input name="spriteUrl" placeholder="Static sprite URL (optional; prefer sprites/ folder)" />

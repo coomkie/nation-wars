@@ -1,11 +1,19 @@
 import { forwardRef, Inject, Injectable, Logger } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { MatchService } from './match.service';
 import { MatchGateway } from './match.gateway';
-import { BATTLEFIELD, COMBAT_TICK_HZ, MatchState, Unit } from '../common/types';
+import {
+  BATTLEFIELD,
+  COMBAT_TICK_HZ,
+  MatchState,
+  Unit,
+} from '../common/types';
 
 /** Soft collision radius — keeps units from stacking on one spot */
 const UNIT_RADIUS = 22;
 const SEPARATION_STRENGTH = 0.55;
+const TRAIL_ZONE_RADIUS = 48;
+const SLOW_REFRESH_SEC = 0.4;
 
 @Injectable()
 export class CombatTickService {
@@ -40,8 +48,6 @@ export class CombatTickService {
       [];
     const damaged: Array<{ unitId: string; hp: number; maxHp: number }> = [];
     const engaged: Array<{ unitId: string; targetUnitId: string }> = [];
-    // Object bag: assignments happen inside tickSwingImpact callbacks;
-    // TS CFA ignores closure writes on bare `let`, which would narrow to `never`.
     const siege = {
       baseDamaged: null as {
         nationId: string;
@@ -51,14 +57,32 @@ export class CombatTickService {
       baseDestroyedNationId: null as string | null,
     };
 
+    if (!match.zones) match.zones = [];
+
     const allUnits = [...match.nationA.units, ...match.nationB.units].filter(
       (u) => u.state !== 'dead',
     );
 
+    // Expire zones + apply zone slows
+    const now = Date.now();
+    match.zones = match.zones.filter((z) => z.expiresAt > now);
     for (const u of allUnits) {
       if ((u.stunRemaining ?? 0) > 0) {
         u.stunRemaining = Math.max(0, (u.stunRemaining ?? 0) - this.dt);
       }
+      if ((u.slowRemaining ?? 0) > 0) {
+        u.slowRemaining = Math.max(0, (u.slowRemaining ?? 0) - this.dt);
+        if ((u.slowRemaining ?? 0) <= 0) u.slowFactor = 0;
+      }
+      // Strongest overlapping enemy-nation zone
+      let zoneSlow = 0;
+      for (const z of match.zones) {
+        if (z.nationId === u.nationId) continue;
+        const d = Math.hypot(u.position.x - z.x, u.position.y - z.y);
+        if (d <= z.radius) zoneSlow = Math.max(zoneSlow, z.slowPct);
+      }
+      if (zoneSlow > 0) this.applySlow(u, zoneSlow);
+
       if (u.targetUnitId) {
         const t = allUnits.find((x) => x.id === u.targetUnitId);
         if (!t || t.state === 'dead' || t.hp <= 0) {
@@ -75,7 +99,6 @@ export class CombatTickService {
       }
     }
 
-    // Desired velocity per unit this tick (then apply collision)
     const desired = new Map<string, { x: number; y: number }>();
 
     for (const unit of allUnits) {
@@ -91,7 +114,55 @@ export class CombatTickService {
         (e) => e.nationId !== unit.nationId && e.hp > 0,
       );
 
-      // Acquire / refresh target while advancing
+      // Cocoon: immobile, no attack/aura; timer → emerge or stay until killed
+      if (unit.state === 'cocooning') {
+        desired.set(unit.id, { x: 0, y: 0 });
+        unit.attackImpactIn = 0;
+        unit.targetUnitId = null;
+        unit.cocoonRemaining = (unit.cocoonRemaining ?? 0) - this.dt;
+        if ((unit.cocoonRemaining ?? 0) <= 0 && unit.hp > 0) {
+          this.emergeFromCocoon(unit, damaged);
+        }
+        continue;
+      }
+
+      // Stationary supports: hold position, no siege / no march
+      if (unit.stationary) {
+        desired.set(unit.id, { x: 0, y: 0 });
+        if (unit.state === 'attacking_base') unit.state = 'advancing';
+        // Optional engage if dealsDamage and enemy in range
+        if (unit.dealsDamage !== false) {
+          const target = this.findTarget(unit, enemies, isA);
+          if (target && this.dist(unit, target) <= unit.attackRangeValue) {
+            unit.targetUnitId = target.id;
+            if (unit.state !== 'engaging') {
+              engaged.push({ unitId: unit.id, targetUnitId: target.id });
+            }
+            unit.state = 'engaging';
+            this.tickSwingImpact(unit, () => {
+              if (unit.state !== 'engaging' || !unit.targetUnitId) return;
+              const still = enemies.find((e) => e.id === unit.targetUnitId);
+              if (!still || still.hp <= 0) return;
+              this.fireUnitAttack(unit, still, enemies, damaged, isA, false);
+            });
+            unit.attackCooldown = (unit.attackCooldown ?? 0) - this.dt;
+            if (
+              (unit.attackCooldown ?? 0) <= 0 &&
+              (unit.attackImpactIn ?? 0) <= 0
+            ) {
+              this.beginUnitSwing(unit, target.position);
+            }
+          } else {
+            unit.state = 'advancing';
+            unit.targetUnitId = null;
+          }
+        } else {
+          unit.state = 'advancing';
+          unit.targetUnitId = null;
+        }
+        continue;
+      }
+
       if (!unit.targetUnitId || unit.state === 'advancing') {
         const target = this.findTarget(unit, enemies, isA);
         if (target) {
@@ -115,11 +186,13 @@ export class CombatTickService {
         if (unit.targetUnitId) {
           const t = enemies.find((e) => e.id === unit.targetUnitId);
           if (t) {
-            // Approach target position (2D); stop short at attack range along the vector
             const dx = t.position.x - unit.position.x;
             const dy = t.position.y - unit.position.y;
             const d = Math.hypot(dx, dy) || 1;
-            const stopAt = Math.max(unit.attackRangeValue * 0.85, UNIT_RADIUS + 4);
+            const stopAt = Math.max(
+              unit.attackRangeValue * 0.85,
+              UNIT_RADIUS + 4,
+            );
             if (d > stopAt) {
               const scale = (d - stopAt) / d;
               goalX = unit.position.x + dx * scale;
@@ -135,7 +208,6 @@ export class CombatTickService {
             goalY = unit.position.y;
           }
         } else {
-          // March toward enemy base; stop at this unit's attack range (ranged sieges from afar)
           const enemyBaseX = isA ? BATTLEFIELD.baseBX : BATTLEFIELD.baseAX;
           const reach = this.baseAttackReach(unit);
           const distX = Math.abs(unit.position.x - enemyBaseX);
@@ -151,8 +223,6 @@ export class CombatTickService {
         }
 
         desired.set(unit.id, this.steerToward(unit, goalX, goalY));
-
-        // Siege check after movement applied below
       }
 
       if (unit.state === 'engaging' && unit.targetUnitId) {
@@ -165,11 +235,9 @@ export class CombatTickService {
         }
 
         const dist = this.dist(unit, target);
-        // Too far: chase again (2D), do not stand still forever
         if (dist > unit.attackRangeValue * 1.2) {
           unit.state = 'advancing';
           unit.attackImpactIn = 0;
-          // Will steer next tick; give a small chase impulse now
           desired.set(
             unit.id,
             this.steerToward(unit, target.position.x, target.position.y),
@@ -177,7 +245,6 @@ export class CombatTickService {
           continue;
         }
 
-        // In range: STOP moving and attack (prevents mutual drag/chase)
         desired.set(unit.id, { x: 0, y: 0 });
 
         this.tickSwingImpact(unit, () => {
@@ -198,6 +265,11 @@ export class CombatTickService {
       }
 
       if (unit.state === 'attacking_base') {
+        if (unit.dealsDamage === false) {
+          unit.state = 'advancing';
+          desired.set(unit.id, { x: 0, y: 0 });
+          continue;
+        }
         const base = isA ? match.baseB : match.baseA;
         const blocker = this.findTarget(unit, enemies, isA);
         if (blocker) {
@@ -254,14 +326,23 @@ export class CombatTickService {
       }
     }
 
-    // Apply steering + soft collision separation (2D)
+    // Aura pulses + trail drops (before movement so trails mark current pos)
+    for (const unit of allUnits) {
+      if (unit.hp <= 0 || unit.state === 'cocooning') continue;
+      const isA = unit.nationId === match.nationA.nationId;
+      const enemies = allUnits.filter(
+        (e) => e.nationId !== unit.nationId && e.hp > 0,
+      );
+      this.tickAura(unit, enemies, damaged, isA);
+      this.tickTrail(unit, match);
+    }
+
     for (const unit of allUnits) {
       if (unit.hp <= 0 || unit.state === 'dead') continue;
 
       let vx = desired.get(unit.id)?.x ?? 0;
       let vy = desired.get(unit.id)?.y ?? 0;
 
-      // Separation from all nearby units
       let sepX = 0;
       let sepY = 0;
       let sepCount = 0;
@@ -279,12 +360,17 @@ export class CombatTickService {
         }
       }
       if (sepCount > 0) {
-        vx += sepX * SEPARATION_STRENGTH * unit.moveSpeed * this.dt;
-        vy += sepY * SEPARATION_STRENGTH * unit.moveSpeed * this.dt;
+        const spd = this.effectiveMoveSpeed(unit);
+        vx += sepX * SEPARATION_STRENGTH * spd * this.dt;
+        vy += sepY * SEPARATION_STRENGTH * spd * this.dt;
       }
 
-      // Engaging / sieging: only allow separation (no chase drag), capped
-      if (unit.state === 'engaging' || unit.state === 'attacking_base') {
+      if (
+        unit.stationary ||
+        unit.state === 'cocooning' ||
+        unit.state === 'engaging' ||
+        unit.state === 'attacking_base'
+      ) {
         vx = sepCount > 0 ? sepX * SEPARATION_STRENGTH * 8 : 0;
         vy = sepCount > 0 ? sepY * SEPARATION_STRENGTH * 8 : 0;
       }
@@ -303,8 +389,11 @@ export class CombatTickService {
         Math.min(BATTLEFIELD.laneMaxY, unit.position.y),
       );
 
-      // Enter base siege when within this unit's attack reach (ranged can stay far)
-      if (unit.state === 'advancing' && !unit.targetUnitId) {
+      if (
+        !unit.stationary &&
+        unit.state === 'advancing' &&
+        !unit.targetUnitId
+      ) {
         const isA = unit.nationId === match.nationA.nationId;
         const enemyBaseX = isA ? BATTLEFIELD.baseBX : BATTLEFIELD.baseAX;
         if (
@@ -314,8 +403,7 @@ export class CombatTickService {
         }
       }
 
-      // If already sieging but drifted out of range, resume advance
-      if (unit.state === 'attacking_base') {
+      if (!unit.stationary && unit.state === 'attacking_base') {
         const isA = unit.nationId === match.nationA.nationId;
         const enemyBaseX = isA ? BATTLEFIELD.baseBX : BATTLEFIELD.baseAX;
         if (
@@ -341,7 +429,6 @@ export class CombatTickService {
     match.nationB.units = match.nationB.units.filter((u) => u.state !== 'dead');
     match.frontline = this.matchService.computeFrontlineFromBases(match);
 
-    // HQ ranged defense — shoot nearest enemy in range
     this.tickBaseDefense(
       match.baseA,
       BATTLEFIELD.baseAX,
@@ -357,7 +444,6 @@ export class CombatTickService {
       damaged,
     );
 
-    // Re-filter in case base killed units this tick
     match.nationA.units = match.nationA.units.filter((u) => u.state !== 'dead');
     match.nationB.units = match.nationB.units.filter((u) => u.state !== 'dead');
 
@@ -385,6 +471,80 @@ export class CombatTickService {
           : match.nationA.nationId;
       void this.matchService.endMatch('base_destroyed', winnerNationId);
     }
+  }
+
+  private tickAura(
+    unit: Unit,
+    enemies: Unit[],
+    damaged: Array<{ unitId: string; hp: number; maxHp: number }>,
+    isA: boolean,
+  ) {
+    if ((unit.auraRadius ?? 0) <= 0) return;
+    const hasEffect =
+      (unit.auraDamagePerTick ?? 0) > 0 ||
+      (unit.auraSlowPct ?? 0) > 0 ||
+      ((unit.auraStunChance ?? 0) > 0 && (unit.auraStunDuration ?? 0) > 0);
+    if (!hasEffect) return;
+
+    unit.auraCooldown = (unit.auraCooldown ?? 0) - this.dt;
+    if ((unit.auraCooldown ?? 0) > 0) return;
+    unit.auraCooldown = Math.max(0.05, unit.auraInterval ?? 1);
+
+    const r = unit.auraRadius;
+    for (const e of enemies) {
+      if (this.dist(unit, e) > r) continue;
+      if ((unit.auraSlowPct ?? 0) > 0) this.applySlow(e, unit.auraSlowPct);
+      if ((unit.auraDamagePerTick ?? 0) > 0) {
+        const before = e.hp;
+        e.hp = Math.max(0, e.hp - unit.auraDamagePerTick);
+        if (e.hp !== before) {
+          damaged.push({ unitId: e.id, hp: e.hp, maxHp: e.maxHp });
+        }
+        if (e.hp <= 0 && e.state !== 'dead') {
+          this.killUnit(e, unit, damaged);
+        }
+      }
+      if (
+        (unit.auraStunChance ?? 0) > 0 &&
+        (unit.auraStunDuration ?? 0) > 0 &&
+        Math.random() < unit.auraStunChance
+      ) {
+        const resist = Math.min(1, Math.max(0, e.stunResist ?? 0));
+        const dur = unit.auraStunDuration * (1 - resist);
+        if (dur > 0) {
+          e.stunRemaining = Math.max(e.stunRemaining ?? 0, dur);
+        }
+      }
+    }
+  }
+
+  private tickTrail(unit: Unit, match: MatchState) {
+    if ((unit.trailSlowPct ?? 0) <= 0 || (unit.trailDuration ?? 0) <= 0) return;
+    const interval = Math.max(0.1, unit.trailInterval || 0.5);
+    unit.trailCooldown = (unit.trailCooldown ?? 0) - this.dt;
+    if ((unit.trailCooldown ?? 0) > 0) return;
+    unit.trailCooldown = interval;
+    match.zones.push({
+      id: randomUUID(),
+      nationId: unit.nationId,
+      x: unit.position.x,
+      y: unit.position.y,
+      radius: TRAIL_ZONE_RADIUS,
+      slowPct: unit.trailSlowPct,
+      expiresAt: Date.now() + unit.trailDuration * 1000,
+    });
+  }
+
+  private applySlow(unit: Unit, slowPct: number) {
+    const pct = Math.max(0, slowPct);
+    if (pct <= 0) return;
+    unit.slowFactor = Math.max(unit.slowFactor ?? 0, pct);
+    unit.slowRemaining = Math.max(unit.slowRemaining ?? 0, SLOW_REFRESH_SEC);
+  }
+
+  private effectiveMoveSpeed(unit: Unit): number {
+    const factor = Math.max(0, unit.slowFactor ?? 0);
+    return unit.moveSpeed * Math.max(0.05, 1 - factor);
   }
 
   private tickBaseDefense(
@@ -433,29 +593,24 @@ export class CombatTickService {
     base.attackCooldown = 1 / Math.max(0.05, spd);
 
     if (best.hp <= 0) {
-      best.state = 'dead';
-      best.targetUnitId = null;
-      this.gateway.emitUnitDied({
-        unitId: best.id,
-        nationId: best.nationId,
-        victimUsername: best.username,
-        victimDisplayName: best.displayName,
-        killerUnitId: `base:${base.nationId}`,
-        killerUsername: 'Base',
-        killerDisplayName: 'Base',
-        killerNationId: base.nationId,
-      });
+      this.killUnit(
+        best,
+        {
+          id: `base:${base.nationId}`,
+          username: 'Base',
+          displayName: 'Base',
+          nationId: base.nationId,
+        } as Unit,
+        damaged,
+      );
     }
   }
 
-  /**
-   * Start a swing: overlay plays attack anim now; damage lands after
-   * attackImpactIn (== 1/attackSpeed, last anim frame).
-   */
   private beginUnitSwing(
     unit: Unit,
     aim: { x: number; y: number },
   ) {
+    if (unit.dealsDamage === false) return;
     const period = 1 / Math.max(0.05, unit.attackSpeed);
     this.gateway.emitUnitAttack(unit.id);
     if (unit.attackRange === 'ranged' && unit.spriteKey !== 'mage') {
@@ -487,6 +642,8 @@ export class CombatTickService {
     isA: boolean,
     emitProjectile = true,
   ) {
+    if (unit.dealsDamage === false) return;
+
     if (
       emitProjectile &&
       unit.attackRange === 'ranged' &&
@@ -506,7 +663,6 @@ export class CombatTickService {
 
     if (unit.isSplash && (unit.splashRadius ?? 0) > 0) {
       const r = unit.splashRadius!;
-      // Overlay VFX: mage_explosion sprites only (no procedural AoE ring)
       for (const e of enemies) {
         if (e.id === primary.id || e.hp <= 0) continue;
         if (this.dist(primary, e) <= r) {
@@ -519,39 +675,41 @@ export class CombatTickService {
       unit.aoeDamage > 0 ? unit.aoeDamage : unit.attackDamage * 0.55;
 
     let primaryDied = false;
+    let healed = false;
+    const healBefore = unit.hp;
+
     for (const { unit: victim, isPrimary } of victims.values()) {
       let dmg = isPrimary ? unit.attackDamage : splashDmg;
-      // Blocking reduces damage from ranged attackers (archer, mage, …)
-      if (unit.attackRange === 'ranged') {
-        const block = Math.min(1, Math.max(0, victim.blocking ?? 0));
-        dmg *= 1 - block;
-      }
+      const mod = victim.damageTakenMods?.[unit.unitTypeId] ?? 0;
+      dmg = Math.max(0, dmg * (1 + mod));
+
       const before = victim.hp;
       victim.hp = Math.max(0, victim.hp - dmg);
-      if (victim.hp !== before) {
+      const dealt = before - victim.hp;
+      if (dealt > 0) {
         damaged.push({
           unitId: victim.id,
           hp: victim.hp,
           maxHp: victim.maxHp,
         });
+        if ((unit.lifesteal ?? 0) > 0) {
+          unit.hp = Math.min(
+            unit.maxHp,
+            unit.hp + dealt * unit.lifesteal,
+          );
+          healed = true;
+        }
       }
       this.applyCrowdControl(unit, victim, isA);
 
       if (victim.hp <= 0 && victim.state !== 'dead') {
-        victim.state = 'dead';
-        victim.targetUnitId = null;
-        this.gateway.emitUnitDied({
-          unitId: victim.id,
-          nationId: victim.nationId,
-          victimUsername: victim.username,
-          victimDisplayName: victim.displayName,
-          killerUnitId: unit.id,
-          killerUsername: unit.username,
-          killerDisplayName: unit.displayName,
-          killerNationId: unit.nationId,
-        });
+        this.killUnit(victim, unit, damaged);
         if (victim.id === primary.id) primaryDied = true;
       }
+    }
+
+    if (healed && unit.hp !== healBefore) {
+      damaged.push({ unitId: unit.id, hp: unit.hp, maxHp: unit.maxHp });
     }
 
     if (primaryDied || primary.hp <= 0) {
@@ -565,7 +723,181 @@ export class CombatTickService {
     }
   }
 
-  /** Stun / knockback — values come from UnitType so they scale via admin */
+  /**
+   * Mark dead, optional onDeath AoE, emit died.
+   * First lethal hit may enter cocoon instead (Molting Cicada).
+   */
+  private killUnit(
+    victim: Unit,
+    killer: Unit,
+    damaged: Array<{ unitId: string; hp: number; maxHp: number }>,
+  ) {
+    if (victim.state === 'dead') return;
+    if (this.tryEnterCocoon(victim, damaged)) return;
+
+    victim.state = 'dead';
+    victim.targetUnitId = null;
+
+    if (victim.onDeathAoe && (victim.splashRadius ?? 0) > 0) {
+      this.triggerDeathAoe(victim, damaged);
+    }
+
+    this.gateway.emitUnitDied({
+      unitId: victim.id,
+      nationId: victim.nationId,
+      victimUsername: victim.username,
+      victimDisplayName: victim.displayName,
+      killerUnitId: killer.id,
+      killerUsername: killer.username,
+      killerDisplayName: killer.displayName,
+      killerNationId: killer.nationId,
+    });
+  }
+
+  /** First death → cocoon with fixed HP; returns true if entered. */
+  private tryEnterCocoon(
+    victim: Unit,
+    damaged: Array<{ unitId: string; hp: number; maxHp: number }>,
+  ): boolean {
+    if (
+      !victim.canMolt ||
+      victim.hasMoltUsed ||
+      victim.state === 'cocooning' ||
+      !victim.moltFormSnapshot ||
+      (victim.cocoonHp ?? 0) <= 0
+    ) {
+      return false;
+    }
+
+    victim.hasMoltUsed = true;
+    victim.state = 'cocooning';
+    victim.targetUnitId = null;
+    victim.attackImpactIn = 0;
+    victim.attackCooldown = 0;
+    victim.stunRemaining = 0;
+    victim.hp = victim.cocoonHp;
+    victim.maxHp = victim.cocoonHp;
+    victim.cocoonRemaining = Math.max(0.1, victim.cocoonDurationSec ?? 5);
+    if (victim.cocoonSpriteKey) {
+      victim.spriteKey = victim.cocoonSpriteKey;
+    }
+
+    damaged.push({
+      unitId: victim.id,
+      hp: victim.hp,
+      maxHp: victim.maxHp,
+    });
+    this.gateway.emitUnitState({
+      unitId: victim.id,
+      state: 'cocooning',
+      targetUnitId: null,
+    });
+    if (victim.cocoonSpriteKey) {
+      this.gateway.emitUnitMolted(victim);
+    }
+    return true;
+  }
+
+  private emergeFromCocoon(
+    unit: Unit,
+    damaged: Array<{ unitId: string; hp: number; maxHp: number }>,
+  ) {
+    const snap = unit.moltFormSnapshot;
+    if (!snap || unit.hp <= 0) return;
+
+    unit.unitTypeId = snap.unitTypeId;
+    unit.unitTypeName = snap.unitTypeName;
+    unit.spriteKey = snap.spriteKey;
+    unit.maxHp = snap.maxHp;
+    unit.hp = snap.maxHp;
+    unit.attackDamage = snap.attackDamage;
+    unit.attackSpeed = snap.attackSpeed;
+    unit.moveSpeed = snap.moveSpeed;
+    unit.attackRange = snap.attackRange;
+    unit.attackRangeValue = snap.attackRangeValue;
+    unit.detectionRange = snap.detectionRange;
+    unit.isSplash = snap.isSplash;
+    unit.splashRadius = snap.splashRadius;
+    unit.stunChance = snap.stunChance;
+    unit.stunDuration = snap.stunDuration;
+    unit.knockbackForce = snap.knockbackForce;
+    unit.stunResist = snap.stunResist;
+    unit.knockbackResist = snap.knockbackResist;
+    unit.aoeDamage = snap.aoeDamage;
+    unit.damageTakenMods = { ...(snap.damageTakenMods ?? {}) };
+    unit.lifesteal = snap.lifesteal;
+    unit.scale = snap.scale;
+    unit.maxActivePerNation = snap.maxActivePerNation;
+    unit.stationary = snap.stationary;
+    unit.dealsDamage = snap.dealsDamage;
+    unit.onDeathAoe = snap.onDeathAoe;
+    unit.auraRadius = snap.auraRadius;
+    unit.auraInterval = snap.auraInterval;
+    unit.auraDamagePerTick = snap.auraDamagePerTick;
+    unit.auraSlowPct = snap.auraSlowPct;
+    unit.auraStunChance = snap.auraStunChance;
+    unit.auraStunDuration = snap.auraStunDuration;
+    unit.trailSlowPct = snap.trailSlowPct;
+    unit.trailDuration = snap.trailDuration;
+    unit.trailInterval = snap.trailInterval;
+    // Form 2 cannot molt again
+    unit.canMolt = false;
+    unit.moltFormSnapshot = null;
+    unit.cocoonRemaining = 0;
+    unit.state = 'advancing';
+    unit.targetUnitId = null;
+
+    damaged.push({ unitId: unit.id, hp: unit.hp, maxHp: unit.maxHp });
+    this.gateway.emitUnitState({
+      unitId: unit.id,
+      state: 'advancing',
+      targetUnitId: null,
+    });
+    this.gateway.emitUnitMolted(unit);
+  }
+
+  private triggerDeathAoe(
+    dead: Unit,
+    damaged: Array<{ unitId: string; hp: number; maxHp: number }>,
+  ) {
+    const match = this.matchService.getState();
+    const radius = dead.splashRadius ?? 0;
+    const dmg =
+      dead.aoeDamage > 0 ? dead.aoeDamage : dead.attackDamage * 0.55;
+    this.gateway.emitExplosion({
+      x: dead.position.x,
+      y: dead.position.y,
+      radius,
+    });
+
+    const enemies = [
+      ...match.nationA.units,
+      ...match.nationB.units,
+    ].filter(
+      (e) =>
+        e.id !== dead.id &&
+        e.nationId !== dead.nationId &&
+        e.state !== 'dead' &&
+        e.hp > 0,
+    );
+
+    const isA = dead.nationId === match.nationA.nationId;
+    for (const e of enemies) {
+      if (this.dist(dead, e) > radius) continue;
+      const mod = e.damageTakenMods?.[dead.unitTypeId] ?? 0;
+      const applied = Math.max(0, dmg * (1 + mod));
+      const before = e.hp;
+      e.hp = Math.max(0, e.hp - applied);
+      if (e.hp !== before) {
+        damaged.push({ unitId: e.id, hp: e.hp, maxHp: e.maxHp });
+      }
+      this.applyCrowdControl(dead, e, isA);
+      if (e.hp <= 0 && e.state !== 'dead') {
+        this.killUnit(e, dead, damaged);
+      }
+    }
+  }
+
   private applyCrowdControl(attacker: Unit, victim: Unit, isA: boolean) {
     if (victim.hp <= 0) return;
     const stunResist = Math.min(1, Math.max(0, victim.stunResist ?? 0));
@@ -583,7 +915,6 @@ export class CombatTickService {
       const dx = victim.position.x - attacker.position.x;
       const dy = victim.position.y - attacker.position.y;
       const d = Math.hypot(dx, dy) || 1;
-      // Prefer push along attacker's march if almost overlapping
       const fx = d < 2 ? (isA ? 1 : -1) : dx / d;
       const fy = d < 2 ? 0 : dy / d;
       victim.position.x += fx * force;
@@ -602,7 +933,6 @@ export class CombatTickService {
     }
   }
 
-  /** How close a unit must be (on X) to siege the enemy HQ */
   private baseAttackReach(unit: Unit): number {
     return Math.max(unit.attackRangeValue, BATTLEFIELD.baseReachDist);
   }
@@ -616,7 +946,7 @@ export class CombatTickService {
     const dy = goalY - unit.position.y;
     const d = Math.hypot(dx, dy);
     if (d < 0.5) return { x: 0, y: 0 };
-    const step = Math.min(d, unit.moveSpeed * this.dt);
+    const step = Math.min(d, this.effectiveMoveSpeed(unit) * this.dt);
     return { x: (dx / d) * step, y: (dy / d) * step };
   }
 
@@ -639,12 +969,10 @@ export class CombatTickService {
     for (const e of enemies) {
       const d = this.dist(unit, e);
       const dx = Math.abs(e.position.x - unit.position.x);
-      const dy = Math.abs(e.position.y - unit.position.y);
       const nearOurBase =
         Math.abs(e.position.x - ourBaseX) <= BATTLEFIELD.baseReachDist + 100;
       const raidingHome = e.state === 'attacking_base' || nearOurBase;
 
-      // Detect mainly by X proximity; Y is closed via diagonal steering
       const inDetect = dx <= unit.detectionRange;
       const homeDefenseRange = Math.max(unit.detectionRange, 450);
       const inHomeDefense = raidingHome && dx <= homeDefenseRange;

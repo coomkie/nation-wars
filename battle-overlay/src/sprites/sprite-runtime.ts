@@ -2,7 +2,13 @@ import { Assets, Texture } from 'pixi.js';
 
 export type DirKey = 'east' | 'west' | 'north' | 'south';
 
-export type UnitClipName = 'idle' | 'running' | 'attack' | 'dead';
+export type UnitClipName =
+  | 'idle'
+  | 'running'
+  | 'attack'
+  | 'dead'
+  | 'cocooning'
+  | 'revive';
 export type CastleClipName = 'idle' | 'crash' | 'damaging';
 
 type ClipMap = Partial<Record<DirKey, string[]>>;
@@ -12,6 +18,8 @@ export interface SpriteClips {
   running: ClipMap;
   attack: ClipMap;
   dead: ClipMap;
+  cocooning?: ClipMap;
+  revive?: ClipMap;
   crash?: ClipMap;
   damaging?: ClipMap;
 }
@@ -96,7 +104,7 @@ export function pickDir(
 
 export function clipForUnitState(state: string, moving: boolean): UnitClipName {
   if (state === 'dead') return 'dead';
-  if (state === 'cocooning') return 'idle';
+  if (state === 'cocooning') return 'cocooning';
   // Combat stance holds idle between swings; attack clip is one-shot per unit:attack
   if (state === 'engaging' || state === 'attacking_base') return 'idle';
   if (moving || state === 'advancing') return 'running';

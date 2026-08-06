@@ -193,6 +193,11 @@ export class AudioManager {
     return `unit:${slug}:spawn`;
   }
 
+  /** Catalog VFX: /audio/sfx/effects/{effectKey}.mp3 */
+  private effectSfxKey(slug: string): SoundKey {
+    return `effect:${slug}`;
+  }
+
   private ensureUnitSfx(
     slug: string,
     action: 'attack' | 'die' | 'spawn',
@@ -207,6 +212,15 @@ export class AudioManager {
     if (this.ready.has(id)) return Promise.resolve(true);
     if (this.failed.has(id)) return Promise.resolve(false);
     const base = `/audio/sfx/units/${slug}_${action}`;
+    return this.loadHowl(id, audioSrc(base), false, 'sfx');
+  }
+
+  private ensureEffectSfx(slug: string): Promise<boolean> {
+    if (!slug) return Promise.resolve(false);
+    const id = this.effectSfxKey(slug);
+    if (this.ready.has(id)) return Promise.resolve(true);
+    if (this.failed.has(id)) return Promise.resolve(false);
+    const base = `/audio/sfx/effects/${slug}`;
     return this.loadHowl(id, audioSrc(base), false, 'sfx');
   }
 
@@ -257,7 +271,10 @@ export class AudioManager {
         const meta = AUDIO_MANIFEST[key as AudioCueId];
         if (meta?.category === 'music') continue;
       }
-      if (typeof key === 'string' && key.startsWith('unit:')) {
+      if (
+        typeof key === 'string' &&
+        (key.startsWith('unit:') || key.startsWith('effect:'))
+      ) {
         howl.volume(this.sfxVol);
         continue;
       }
@@ -370,6 +387,24 @@ export class AudioManager {
     void this.ensureUnitSfx(slug, 'die').then((ok) => {
       if (ok) this.play(this.unitDieKey(slug));
       else this.play('unit_die');
+    });
+  }
+
+  /**
+   * Effect SFX: sfx/effects/{effectKey}.mp3
+   * e.g. bomb_carrior_explosion → /audio/sfx/effects/bomb_carrior_explosion.mp3
+   */
+  playEffectSfx(effectKey?: string, throttleMs = 80) {
+    const slug = unitSlug(effectKey);
+    if (!slug) return;
+    const throttleKey = `fx:${slug}`;
+    const now = performance.now();
+    const until = this.throttleUntil.get(throttleKey) ?? 0;
+    if (now < until) return;
+    this.throttleUntil.set(throttleKey, now + throttleMs);
+
+    void this.ensureEffectSfx(slug).then((ok) => {
+      if (ok) this.play(this.effectSfxKey(slug));
     });
   }
 

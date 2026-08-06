@@ -48,7 +48,36 @@ battle-overlay/public/audio/sfx/units/
   knight_spawn.mp3
   knight_attack.mp3
   knight_die.mp3
+  cicada_spawn.mp3
+  cicada_attack.mp3
+  cicada_cocoon_spawn.mp3
+  cicada_form2_spawn.mp3
+  cicada_form2_attack.mp3
+  bomb_carrior_spawn.mp3
+  bomb_carrior_attack.mp3
+  bomb_carrior_die.mp3
+  rat_spawn.mp3
+  rat_attack.mp3
+  rat_die.mp3
 ```
+
+## Effect SFX (explosions / VFX)
+
+**Folder:** `battle-overlay/public/audio/sfx/effects/`
+
+Naming matches the catalog effects key (sprite folder under `sprites/`):
+
+| File | When |
+|------|------|
+| `{effectKey}.mp3` | Catalog VFX plays (e.g. death boom) |
+
+Example for Bomb Carrier:
+
+```text
+battle-overlay/public/audio/sfx/effects/bomb_carrior_explosion.mp3
+```
+
+Do **not** put explosion under `units/` — that folder is only `{spriteKey}_spawn|attack|die`.
 
 Fallback if a unit file is missing:
 
@@ -77,6 +106,8 @@ battle-overlay/public/audio/
       {spriteKey}_spawn.mp3
       {spriteKey}_attack.mp3
       {spriteKey}_die.mp3
+    effects/               ← catalog VFX (explosions, etc.)
+      {effectKey}.mp3      ← e.g. bomb_carrior_explosion.mp3
 ```
 
 Vite serves this as `/audio/...` (e.g. `/audio/sfx/units/knight_spawn.mp3`).

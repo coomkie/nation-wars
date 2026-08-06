@@ -738,10 +738,6 @@ export class CombatTickService {
     victim.state = 'dead';
     victim.targetUnitId = null;
 
-    if (victim.onDeathAoe && (victim.splashRadius ?? 0) > 0) {
-      this.triggerDeathAoe(victim, damaged);
-    }
-
     this.gateway.emitUnitDied({
       unitId: victim.id,
       nationId: victim.nationId,
@@ -751,7 +747,14 @@ export class CombatTickService {
       killerUsername: killer.username,
       killerDisplayName: killer.displayName,
       killerNationId: killer.nationId,
+      spriteKey: victim.spriteKey,
+      onDeathAoe: !!victim.onDeathAoe,
     });
+
+    // After unit:died so overlay can mark dying before fx:explosion attaches.
+    if (victim.onDeathAoe && (victim.splashRadius ?? 0) > 0) {
+      this.triggerDeathAoe(victim, damaged);
+    }
   }
 
   /** First death → cocoon with fixed HP; returns true if entered. */
@@ -792,9 +795,7 @@ export class CombatTickService {
       state: 'cocooning',
       targetUnitId: null,
     });
-    if (victim.cocoonSpriteKey) {
-      this.gateway.emitUnitMolted(victim);
-    }
+    this.gateway.emitUnitMolted(victim);
     return true;
   }
 
@@ -868,6 +869,7 @@ export class CombatTickService {
       x: dead.position.x,
       y: dead.position.y,
       radius,
+      effect: `${dead.spriteKey}_explosion`,
     });
 
     const enemies = [

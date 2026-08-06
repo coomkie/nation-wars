@@ -11,6 +11,10 @@ export interface SpriteClips {
   running: ClipMap;
   attack: ClipMap;
   dead: ClipMap;
+  /** Form-1 enter-cocoon one-shot (Molting Cicada) */
+  cocooning?: ClipMap;
+  /** Cocoon emerge one-shot before form-2 */
+  revive?: ClipMap;
   crash?: ClipMap;
   damaging?: ClipMap;
 }
@@ -37,7 +41,10 @@ const FOLDER_TO_KEY: Record<string, string> = {
 };
 
 /** Flat effect folders (frame_*.png at root of folder) */
-const EFFECT_FOLDERS = new Set(['mage_explosion']);
+const EFFECT_FOLDERS = new Set([
+  'mage_explosion',
+  'bomb_carrior_explosion',
+]);
 
 @Injectable()
 export class SpritesService implements OnModuleInit {
@@ -102,6 +109,8 @@ export class SpritesService implements OnModuleInit {
       running: {},
       attack: {},
       dead: {},
+      cocooning: {},
+      revive: {},
       crash: {},
       damaging: {},
     };
@@ -152,6 +161,8 @@ export class SpritesService implements OnModuleInit {
     if (n === 'running') return 'running';
     if (n === 'attack') return 'attack';
     if (n === 'dead') return 'dead';
+    if (n === 'cocooning') return 'cocooning';
+    if (n === 'revive') return 'revive';
     if (n === 'crash') return 'crash';
     if (n === 'damaging') return 'damaging';
     return null;

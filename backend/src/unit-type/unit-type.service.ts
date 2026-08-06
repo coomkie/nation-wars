@@ -66,6 +66,7 @@ export class UnitTypeService implements OnModuleInit {
       const count = await this.repo.count();
       if (count === 0) {
         await this.seedDefaults();
+        await this.ensureCicadaMoltLink();
       } else {
         await this.repo
           .createQueryBuilder()
@@ -240,6 +241,77 @@ export class UnitTypeService implements OnModuleInit {
         knockbackResist: 0.3,
         scale: 1,
       },
+      // Form 2 first so ensureCicadaMoltLink can find it after insert
+      {
+        name: 'Cicada Form 2',
+        spriteKey: 'cicada_form2',
+        baseHp: 55,
+        baseAttackDamage: 14,
+        attackSpeed: 1.2,
+        moveSpeed: 65,
+        attackRange: 'melee',
+        attackRangeValue: 42,
+        detectionRange: 130,
+        isSplash: false,
+        splashRadius: null,
+        scale: 0.95,
+        canMolt: false,
+      },
+      {
+        name: 'Cicada',
+        spriteKey: 'cicada',
+        baseHp: 140,
+        baseAttackDamage: 16,
+        attackSpeed: 0.9,
+        moveSpeed: 42,
+        attackRange: 'melee',
+        attackRangeValue: 44,
+        detectionRange: 140,
+        isSplash: false,
+        splashRadius: null,
+        scale: 1.1,
+        canMolt: true,
+        cocoonHp: 80,
+        cocoonDurationSec: 5,
+        cocoonSpriteKey: 'cicada_cocoon',
+        // moltFormUnitTypeId set in ensureCicadaMoltLink after Form 2 exists
+      },
+      {
+        name: 'Bomb Carrier',
+        // Folder typo kept on disk: bomb_carrior
+        spriteKey: 'bomb_carrior',
+        baseHp: 70,
+        baseAttackDamage: 6,
+        attackSpeed: 0.7,
+        moveSpeed: 40,
+        attackRange: 'melee',
+        attackRangeValue: 40,
+        detectionRange: 110,
+        isSplash: false,
+        splashRadius: 110,
+        aoeDamage: 45,
+        onDeathAoe: true,
+        stunChance: 0.35,
+        stunDuration: 1.0,
+        scale: 1.05,
+      },
+      {
+        name: 'Plague Rat',
+        spriteKey: 'rat',
+        baseHp: 85,
+        baseAttackDamage: 8,
+        attackSpeed: 1.0,
+        moveSpeed: 48,
+        attackRange: 'melee',
+        attackRangeValue: 40,
+        detectionRange: 120,
+        isSplash: false,
+        splashRadius: null,
+        auraRadius: 95,
+        auraInterval: 0.45,
+        auraDamagePerTick: 5,
+        scale: 1.15,
+      },
     ];
   }
 
@@ -250,6 +322,36 @@ export class UnitTypeService implements OnModuleInit {
         await this.repo.save(this.repo.create(def));
       }
     }
+    await this.ensureCicadaMoltLink();
+  }
+
+  /** Wire Cicada → Cicada Form 2 + cocoon sprite key */
+  private async ensureCicadaMoltLink() {
+    const form2 = await this.repo.findOne({ where: { name: 'Cicada Form 2' } });
+    const form1 = await this.repo.findOne({ where: { name: 'Cicada' } });
+    if (!form1 || !form2) return;
+    let dirty = false;
+    if (form1.moltFormUnitTypeId !== form2.id) {
+      form1.moltFormUnitTypeId = form2.id;
+      dirty = true;
+    }
+    if (!form1.canMolt) {
+      form1.canMolt = true;
+      dirty = true;
+    }
+    if (!form1.cocoonSpriteKey) {
+      form1.cocoonSpriteKey = 'cicada_cocoon';
+      dirty = true;
+    }
+    if (!(form1.cocoonHp > 0)) {
+      form1.cocoonHp = 80;
+      dirty = true;
+    }
+    if (!(form1.cocoonDurationSec > 0)) {
+      form1.cocoonDurationSec = 5;
+      dirty = true;
+    }
+    if (dirty) await this.repo.save(form1);
   }
 
   findAll(): Promise<UnitTypeEntity[]> {

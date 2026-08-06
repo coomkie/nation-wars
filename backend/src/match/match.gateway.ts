@@ -67,6 +67,8 @@ export class MatchGateway implements OnGatewayConnection {
     killerUsername: string;
     killerDisplayName: string;
     killerNationId: string;
+    spriteKey?: string;
+    onDeathAoe?: boolean;
   }) {
     this.server?.emit('unit:died', payload);
   }
@@ -98,6 +100,8 @@ export class MatchGateway implements OnGatewayConnection {
     x: number;
     y: number;
     radius: number;
+    /** Catalog effects key, e.g. bomb_carrior_explosion */
+    effect?: string;
   }) {
     this.server?.emit('fx:explosion', payload);
   }

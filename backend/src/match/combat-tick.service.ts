@@ -40,12 +40,16 @@ export class CombatTickService {
       [];
     const damaged: Array<{ unitId: string; hp: number; maxHp: number }> = [];
     const engaged: Array<{ unitId: string; targetUnitId: string }> = [];
-    let baseDamaged: {
-      nationId: string;
-      currentHp: number;
-      maxHp: number;
-    } | null = null;
-    let baseDestroyedNationId: string | null = null;
+    // Object bag: assignments happen inside tickSwingImpact callbacks;
+    // TS CFA ignores closure writes on bare `let`, which would narrow to `never`.
+    const siege = {
+      baseDamaged: null as {
+        nationId: string;
+        currentHp: number;
+        maxHp: number;
+      } | null,
+      baseDestroyedNationId: null as string | null,
+    };
 
     const allUnits = [...match.nationA.units, ...match.nationB.units].filter(
       (u) => u.state !== 'dead',
@@ -230,13 +234,13 @@ export class CombatTickService {
         this.tickSwingImpact(unit, () => {
           if (unit.state !== 'attacking_base') return;
           base.currentHp = Math.max(0, base.currentHp - unit.attackDamage);
-          baseDamaged = {
+          siege.baseDamaged = {
             nationId: base.nationId,
             currentHp: base.currentHp,
             maxHp: base.maxHp,
           };
           if (base.currentHp <= 0) {
-            baseDestroyedNationId = base.nationId;
+            siege.baseDestroyedNationId = base.nationId;
           }
         });
 
@@ -364,19 +368,19 @@ export class CombatTickService {
     for (const d of damaged) {
       this.gateway.emitUnitDamaged(d.unitId, d.hp, d.maxHp);
     }
-    if (baseDamaged) {
+    if (siege.baseDamaged) {
       this.gateway.emitBaseDamaged(
-        baseDamaged.nationId,
-        baseDamaged.currentHp,
-        baseDamaged.maxHp,
+        siege.baseDamaged.nationId,
+        siege.baseDamaged.currentHp,
+        siege.baseDamaged.maxHp,
       );
       this.gateway.emitMatchUpdate(match);
     }
 
-    if (baseDestroyedNationId) {
-      this.gateway.emitBaseDestroyed(baseDestroyedNationId);
+    if (siege.baseDestroyedNationId) {
+      this.gateway.emitBaseDestroyed(siege.baseDestroyedNationId);
       const winnerNationId =
-        baseDestroyedNationId === match.nationA.nationId
+        siege.baseDestroyedNationId === match.nationA.nationId
           ? match.nationB.nationId
           : match.nationA.nationId;
       void this.matchService.endMatch('base_destroyed', winnerNationId);

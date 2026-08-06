@@ -1,5 +1,9 @@
 import { Howl, Howler } from 'howler';
 
+/** Concurrent WebAudio voices — default Howler pool (5) drops SFX in busy fights */
+Howler.html5PoolSize = 20;
+Howler.autoUnlock = true;
+
 export type AudioCueId =
   | 'battle_start'
   | 'battle_loop'
@@ -82,15 +86,23 @@ function unitSlug(spriteKey: string | undefined | null): string {
     .replace(/[^a-z0-9_-]/g, '');
 }
 
-/** Drop SPA HTML fallbacks (Vite returns 200 text/html for missing public files). */
+/** Drop SPA HTML fallbacks and empty files (0-byte mp3 fails silently in Howler). */
 async function resolveExistingSrc(candidates: string[]): Promise<string[]> {
   const out: string[] = [];
   for (const url of candidates) {
     try {
       const r = await fetch(url, { method: 'HEAD' });
       const ct = (r.headers.get('content-type') || '').toLowerCase();
-      if (r.ok && !ct.includes('text/html') && !ct.startsWith('text/')) {
+      const len = Number(r.headers.get('content-length') || '0');
+      if (
+        r.ok &&
+        !ct.includes('text/html') &&
+        !ct.startsWith('text/') &&
+        len > 0
+      ) {
         out.push(url);
+      } else if (r.ok && len === 0) {
+        console.warn(`[audio] skip empty file: ${url}`);
       }
     } catch {
       /* skip */
@@ -108,6 +120,7 @@ export class AudioManager {
   private musicVol = DEFAULT_MUSIC_VOL;
   private sfxVol = DEFAULT_SFX_VOL;
   private currentMusic: AudioCueId | null = null;
+  private pendingMusic: AudioCueId | null = null;
   private throttleUntil = new Map<string, number>();
   private initPromise: Promise<void> | null = null;
 
@@ -158,9 +171,18 @@ export class AudioManager {
           volume: category === 'music' ? this.musicVol : this.sfxVol,
           preload: true,
           html5: category === 'music',
+          pool: category === 'music' ? 2 : 10,
           onload: () => {
             this.ready.add(id);
             this.loading.delete(id);
+            if (
+              this.pendingMusic === id &&
+              id in AUDIO_MANIFEST &&
+              AUDIO_MANIFEST[id as AudioCueId]?.category === 'music'
+            ) {
+              this.pendingMusic = null;
+              this.playMusicNow(id as AudioCueId);
+            }
             resolve(true);
           },
           onloaderror: (_sid, err) => {
@@ -282,6 +304,18 @@ export class AudioManager {
     }
   }
 
+  private async resumeCtx(): Promise<void> {
+    const ctx = Howler.ctx;
+    if (!ctx) return;
+    if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
+      try {
+        await ctx.resume();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
   play(id: SoundKey, throttleMs = 0) {
     if (!this.ready.has(id)) return;
     if (throttleMs > 0) {
@@ -292,12 +326,22 @@ export class AudioManager {
     }
     const s = this.sounds.get(id);
     if (!s) return;
-    try {
-      void Howler.ctx?.resume?.();
-      s.play();
-    } catch (e) {
-      console.warn(`[audio] play ${id} failed`, e);
-    }
+    void this.resumeCtx().then(() => {
+      try {
+        const sid = s.play();
+        if (sid === undefined || sid === null) {
+          void this.resumeCtx().then(() => {
+            try {
+              s.play();
+            } catch {
+              /* ignore */
+            }
+          });
+        }
+      } catch (e) {
+        console.warn(`[audio] play ${id} failed`, e);
+      }
+    });
   }
 
   /**
@@ -394,7 +438,7 @@ export class AudioManager {
    * Effect SFX: sfx/effects/{effectKey}.mp3
    * e.g. bomb_carrior_explosion → /audio/sfx/effects/bomb_carrior_explosion.mp3
    */
-  playEffectSfx(effectKey?: string, throttleMs = 80) {
+  playEffectSfx(effectKey?: string, throttleMs = 40) {
     const slug = unitSlug(effectKey);
     if (!slug) return;
     const throttleKey = `fx:${slug}`;
@@ -408,24 +452,71 @@ export class AudioManager {
     });
   }
 
+  /** Warm spawn/attack buffers when a unit appears so first impact isn't silent */
+  preloadUnitSfx(spriteKey?: string) {
+    const slug = unitSlug(spriteKey);
+    if (!slug) return;
+    void this.ensureUnitSfx(slug, 'spawn');
+    void this.ensureUnitSfx(slug, 'attack');
+    void this.ensureUnitSfx(slug, 'die');
+  }
+
+  preloadEffectSfx(effectKey?: string) {
+    const slug = unitSlug(effectKey);
+    if (!slug) return;
+    void this.ensureEffectSfx(slug);
+  }
+
+  private ensureMusic(id: AudioCueId): Promise<boolean> {
+    const meta = AUDIO_MANIFEST[id];
+    if (!meta || meta.category !== 'music') return Promise.resolve(false);
+    if (this.ready.has(id)) return Promise.resolve(true);
+    if (this.failed.has(id)) return Promise.resolve(false);
+    const pending = this.loading.get(id);
+    if (pending) return pending;
+    return this.loadHowl(id, meta.src, !!meta.loop, meta.category);
+  }
+
   playMusic(id: AudioCueId) {
+    void this.init().then(() => {
+      if (this.ready.has(id)) {
+        this.playMusicNow(id);
+        return;
+      }
+      if (this.failed.has(id)) {
+        if (id === 'battle_loop') {
+          console.warn(
+            '[audio] battle_loop not loaded — replace public/audio/music/battle_loop.mp3 (file must not be empty)',
+          );
+        }
+        return;
+      }
+      this.pendingMusic = id;
+      void this.ensureMusic(id);
+    });
+  }
+
+  private playMusicNow(id: AudioCueId) {
     if (!this.ready.has(id)) return;
     if (this.currentMusic === id) {
       const cur = this.sounds.get(id);
-      if (cur && !cur.playing()) cur.play();
+      if (cur && !cur.playing()) {
+        void this.resumeCtx().then(() => cur.play());
+      }
       return;
     }
     this.stopMusic();
     const s = this.sounds.get(id);
     if (!s) return;
-    try {
-      void Howler.ctx?.resume?.();
-      s.volume(this.musicVol);
-      s.play();
-      this.currentMusic = id;
-    } catch (e) {
-      console.warn(`[audio] music ${id} failed`, e);
-    }
+    void this.resumeCtx().then(() => {
+      try {
+        s.volume(this.musicVol);
+        s.play();
+        this.currentMusic = id;
+      } catch (e) {
+        console.warn(`[audio] music ${id} failed`, e);
+      }
+    });
   }
 
   stopMusic(fadeMs = 400) {
@@ -447,8 +538,30 @@ export class AudioManager {
 
   onBattleStart() {
     this.unlock();
-    this.play('battle_start');
-    this.playMusic('battle_loop');
+    void this.init().then(async () => {
+      const [startOk, loopOk] = await Promise.all([
+        this.ensureMusic('battle_start'),
+        this.ensureMusic('battle_loop'),
+      ]);
+      if (startOk) {
+        const sting = this.sounds.get('battle_start');
+        if (sting) {
+          sting.volume(this.musicVol);
+          void this.resumeCtx().then(() => {
+            const sid = sting.play();
+            if (loopOk) {
+              sting.once('end', () => this.playMusic('battle_loop'));
+            }
+            if ((sid === undefined || sid === null) && loopOk) {
+              // Autoplay blocked or instant end — still start loop
+              this.playMusic('battle_loop');
+            }
+          });
+          return;
+        }
+      }
+      if (loopOk) this.playMusic('battle_loop');
+    });
   }
 
   onBattleEnd(playVictory = true) {

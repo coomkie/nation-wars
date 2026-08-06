@@ -263,12 +263,10 @@ export class MatchService implements OnModuleInit {
       this.unitTypeCache.set(t.id, t);
     }
 
-    const duration = dto.durationMinutes ?? this.defaults.durationMinutes;
     const intermission =
       dto.intermissionSeconds ?? this.defaults.intermissionSeconds;
     const baseMaxHp = dto.baseMaxHp ?? this.defaults.baseMaxHp;
 
-    this.defaults.durationMinutes = duration;
     this.defaults.intermissionSeconds = intermission;
     this.defaults.baseMaxHp = baseMaxHp;
     if (dto.baseAttackRange != null && dto.baseAttackRange >= 0) {
@@ -285,7 +283,6 @@ export class MatchService implements OnModuleInit {
     this.defaults.defaultUnitTypeId = dto.defaultUnitTypeId;
 
     const startedAt = new Date();
-    const endsAt = new Date(startedAt.getTime() + duration * 60_000);
     const matchId = randomUUID();
 
     this.match = {
@@ -297,7 +294,7 @@ export class MatchService implements OnModuleInit {
       baseB: this.emptyBase(dto.nationBId, baseMaxHp),
       frontline: 0,
       startedAt: startedAt.toISOString(),
-      endsAt: endsAt.toISOString(),
+      endsAt: null,
       status: 'active',
       winnerNationId: null,
       endReason: null,
@@ -305,7 +302,7 @@ export class MatchService implements OnModuleInit {
       defaultUnitTypeId: dto.defaultUnitTypeId,
       giftMappings: this.defaults.giftMappings,
       giftUnitTypeMappings: this.defaults.giftUnitTypeMappings,
-      durationMinutes: duration,
+      durationMinutes: 0,
       intermissionSeconds: intermission,
       nextMatchAt: null,
       championNationId: null,
@@ -322,13 +319,11 @@ export class MatchService implements OnModuleInit {
       await this.brackets.linkMatch(bracketNodeId, matchId);
     }
 
-    this.timer.start(endsAt);
     this.combat.start();
     this.gateway.emitMatchStarted({
       matchId,
       nationA: dto.nationAId,
       nationB: dto.nationBId,
-      endsAt: endsAt.toISOString(),
     });
     this.gateway.emitMatchInit(this.match);
     this.logger.log(`Match ${matchId} started (combat on)`);
@@ -404,6 +399,10 @@ export class MatchService implements OnModuleInit {
           damageTakenMods: s.damageTakenMods,
           lifesteal: s.lifesteal,
           scale: s.scale,
+          sfxSpawnVolume: s.sfxSpawnVolume,
+          sfxAttackVolume: s.sfxAttackVolume,
+          attackSfxFrame: s.attackSfxFrame ?? null,
+          attackShotFrame: s.attackShotFrame ?? null,
           maxActivePerNation: s.maxActivePerNation,
           stationary: s.stationary,
           dealsDamage: s.dealsDamage,
@@ -505,6 +504,14 @@ export class MatchService implements OnModuleInit {
       damageTakenMods: stats.damageTakenMods ?? {},
       lifesteal: stats.lifesteal ?? 0,
       scale: stats.scale ?? 1,
+      sfxSpawnVolume: stats.sfxSpawnVolume ?? 1,
+      sfxAttackVolume: stats.sfxAttackVolume ?? 1,
+      attackSfxFrame:
+        typeof stats.attackSfxFrame === 'number' ? stats.attackSfxFrame : null,
+      attackShotFrame:
+        typeof stats.attackShotFrame === 'number'
+          ? stats.attackShotFrame
+          : null,
       maxActivePerNation: stats.maxActivePerNation ?? 0,
       stationary: stats.stationary ?? false,
       dealsDamage: stats.dealsDamage ?? true,
@@ -736,8 +743,8 @@ export class MatchService implements OnModuleInit {
     return this.match;
   }
 
-  /** Used when match timer expires */
+  /** Match timer removed — matches end only when a base is destroyed. */
   onTimerExpired(): void {
-    void this.endMatch('timeout');
+    /* no-op */
   }
 }

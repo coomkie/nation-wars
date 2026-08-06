@@ -1,3 +1,10 @@
+import {
+  UnitAnimPreview,
+  fetchSpriteCatalog,
+  type ClipName,
+  type DirKey,
+} from './unit-preview';
+
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
 type Nation = { id: string; name: string; flagUrl: string };
@@ -14,6 +21,12 @@ type UnitType = {
   attackRangeValue: number;
   detectionRange: number;
   scale?: number;
+  sfxSpawnVolume?: number;
+  sfxAttackVolume?: number;
+  /** 0-based; null = last Attack frame */
+  attackSfxFrame?: number | null;
+  /** 0-based; null = last Attack frame (ranged shot) */
+  attackShotFrame?: number | null;
   isSplash?: boolean;
   splashRadius?: number | null;
   stunChance?: number;
@@ -104,14 +117,244 @@ function escapeHtml(s: string) {
     .replace(/"/g, '&quot;');
 }
 
+/** Blank / invalid → null (use last Attack frame). */
+function parseOptionalFrame(raw: FormDataEntryValue | null): number | null {
+  const s = String(raw ?? '').trim();
+  if (s === '') return null;
+  const n = Number(s);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.floor(n);
+}
+
 document.querySelectorAll<HTMLButtonElement>('.nav').forEach((btn) => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.nav').forEach((b) => b.classList.remove('active'));
     document.querySelectorAll('.page').forEach((p) => p.classList.remove('active'));
     btn.classList.add('active');
-    document.getElementById(`page-${btn.dataset.page}`)?.classList.add('active');
+    const page = btn.dataset.page || '';
+    document.getElementById(`page-${page}`)?.classList.add('active');
+    placeUnitTypeForm(page === 'unit-test' ? 'test' : 'list');
+    if (page === 'unit-test') void refreshUnitTestPreview();
   });
 });
+
+/** Shared unit-type form lives on Unit Types or Test Unit tab. */
+function placeUnitTypeForm(where: 'list' | 'test') {
+  const form = document.getElementById('unitTypeForm');
+  const listSlot = document.getElementById('unitTypeFormSlot');
+  const testSlot = document.getElementById('unitTestFormSlot');
+  if (!form || !listSlot || !testSlot) return;
+  if (where === 'test') {
+    if (form.parentElement !== testSlot) testSlot.appendChild(form);
+  } else if (form.parentElement !== listSlot) {
+    listSlot.appendChild(form);
+  }
+}
+
+let unitPreview: UnitAnimPreview | null = null;
+
+function ensureUnitPreview(): UnitAnimPreview | null {
+  if (unitPreview) return unitPreview;
+  const canvas = document.getElementById(
+    'unitTestCanvas',
+  ) as HTMLCanvasElement | null;
+  if (!canvas) return null;
+  unitPreview = new UnitAnimPreview(canvas, API_URL);
+  unitPreview.setOnFrame(({ index, total }) => {
+    const meta = document.getElementById('unitTestFrameMeta');
+    if (meta) {
+      meta.textContent =
+        total > 0
+          ? `frame ${index} / ${total - 1}  (${total} frames @ 10fps)`
+          : 'frame —';
+    }
+  });
+  return unitPreview;
+}
+
+function readPreviewMarkersFromForm(): {
+  sfxFrame: number | null;
+  shotFrame: number | null;
+  scale: number;
+  spriteKey: string;
+  sfxAttackVolume: number;
+} {
+  const form = document.getElementById('unitTypeForm') as HTMLFormElement;
+  return {
+    sfxFrame: parseOptionalFrame(
+      (form.elements.namedItem('attackSfxFrame') as HTMLInputElement)?.value ??
+        '',
+    ),
+    shotFrame: parseOptionalFrame(
+      (form.elements.namedItem('attackShotFrame') as HTMLInputElement)?.value ??
+        '',
+    ),
+    scale: Number(
+      (form.elements.namedItem('scale') as HTMLInputElement)?.value || 1,
+    ),
+    spriteKey: String(
+      (form.elements.namedItem('spriteKey') as HTMLInputElement)?.value || '',
+    ).trim(),
+    sfxAttackVolume: Number(
+      (form.elements.namedItem('sfxAttackVolume') as HTMLInputElement)?.value ||
+        1,
+    ),
+  };
+}
+
+function unitTestLoopChecked(): boolean {
+  return !!(document.getElementById('unitTestLoop') as HTMLInputElement)
+    ?.checked;
+}
+
+function unitTestSfxChecked(): boolean {
+  return !!(document.getElementById('unitTestSfx') as HTMLInputElement)
+    ?.checked;
+}
+
+async function refreshUnitTestPreview() {
+  const preview = ensureUnitPreview();
+  if (!preview) return;
+  const catalog = await fetchSpriteCatalog(API_URL);
+  preview.setCatalog(catalog);
+
+  const sel = document.getElementById('unitTestSelect') as HTMLSelectElement;
+  const clipEl = document.getElementById('unitTestClip') as HTMLSelectElement;
+  const dirEl = document.getElementById('unitTestDir') as HTMLSelectElement;
+  const status = document.getElementById('unitTestStatus');
+  const unit = unitTypes.find((t) => t.id === sel?.value);
+  const fromForm = readPreviewMarkersFromForm();
+  const spriteKey = fromForm.spriteKey || unit?.spriteKey || '';
+  const clip = (clipEl?.value || 'attack') as ClipName;
+  const dir = (dirEl?.value || 'east') as DirKey;
+  const loop = unitTestLoopChecked();
+
+  // Default loop: running/idle on unless user unchecked after load — checkbox is source of truth
+  preview.setSfxEnabled(unitTestSfxChecked());
+  preview.setSfxSource(
+    spriteKey,
+    fromForm.sfxAttackVolume || unit?.sfxAttackVolume || 1,
+  );
+  preview.setMarkers({
+    sfxFrame: fromForm.sfxFrame,
+    shotFrame: fromForm.shotFrame,
+  });
+  preview.setDisplayScale(fromForm.scale || unit?.scale || 1);
+
+  if (!spriteKey) {
+    if (status) status.textContent = 'Select a unit type to preview.';
+    await preview.load('', clip, dir, { loop });
+    return;
+  }
+  const result = await preview.load(spriteKey, clip, dir, { loop });
+  if (status) {
+    status.textContent = result.ok
+      ? `${spriteKey} · ${clip}/${dir} · ${result.frames} frames${loop ? ' · loop' : ''}`
+      : result.message || 'Failed to load frames';
+  }
+}
+
+function fillUnitTestSelect(selectedId = '') {
+  const sel = document.getElementById('unitTestSelect') as HTMLSelectElement;
+  if (!sel) return;
+  const keep = selectedId || sel.value;
+  sel.innerHTML =
+    `<option value="">— select unit type —</option>` +
+    unitTypes
+      .map(
+        (t) =>
+          `<option value="${t.id}" ${t.id === keep ? 'selected' : ''}>${escapeHtml(t.name)} (${escapeHtml(t.spriteKey)})</option>`,
+      )
+      .join('');
+}
+
+function openUnitInTestTab(unitId: string) {
+  const unit = unitTypes.find((t) => t.id === unitId);
+  if (!unit) return;
+  document.querySelectorAll('.nav').forEach((b) => b.classList.remove('active'));
+  document.querySelectorAll('.page').forEach((p) => p.classList.remove('active'));
+  document
+    .querySelector<HTMLButtonElement>('.nav[data-page="unit-test"]')
+    ?.classList.add('active');
+  document.getElementById('page-unit-test')?.classList.add('active');
+  placeUnitTypeForm('test');
+  fillUnitTestSelect(unitId);
+  setUnitTypeFormMode(unit);
+  void refreshUnitTestPreview();
+}
+
+function wireUnitTestControls() {
+  ensureUnitPreview();
+
+  // Sensible default: loop running/idle when clip changes if user hasn't touched loop yet
+  const loopEl = document.getElementById('unitTestLoop') as HTMLInputElement;
+  const sfxEl = document.getElementById('unitTestSfx') as HTMLInputElement;
+
+  document
+    .getElementById('unitTestSelect')
+    ?.addEventListener('change', () => {
+      const id = (document.getElementById('unitTestSelect') as HTMLSelectElement)
+        .value;
+      const unit = unitTypes.find((t) => t.id === id);
+      if (unit) setUnitTypeFormMode(unit);
+      else setUnitTypeFormMode(null);
+      void refreshUnitTestPreview();
+    });
+  document.getElementById('unitTestClip')?.addEventListener('change', () => {
+    const clip = (document.getElementById('unitTestClip') as HTMLSelectElement)
+      .value;
+    if (loopEl && !loopEl.dataset.userTouched) {
+      loopEl.checked = clip === 'running' || clip === 'idle';
+    }
+    void refreshUnitTestPreview();
+  });
+  document
+    .getElementById('unitTestDir')
+    ?.addEventListener('change', () => void refreshUnitTestPreview());
+  document.getElementById('unitTestPlay')?.addEventListener('click', () => {
+    ensureUnitPreview()?.setPlaying(true);
+  });
+  document.getElementById('unitTestPause')?.addEventListener('click', () => {
+    ensureUnitPreview()?.setPlaying(false);
+  });
+  document.getElementById('unitTestRestart')?.addEventListener('click', () => {
+    ensureUnitPreview()?.restart();
+  });
+  document.getElementById('unitTestPrev')?.addEventListener('click', () => {
+    ensureUnitPreview()?.step(-1);
+  });
+  document.getElementById('unitTestNext')?.addEventListener('click', () => {
+    ensureUnitPreview()?.step(1);
+  });
+  loopEl?.addEventListener('change', () => {
+    loopEl.dataset.userTouched = '1';
+    ensureUnitPreview()?.setLoop(loopEl.checked);
+  });
+  sfxEl?.addEventListener('change', () => {
+    ensureUnitPreview()?.setSfxEnabled(sfxEl.checked);
+  });
+
+  const form = document.getElementById('unitTypeForm');
+  form?.addEventListener('input', (e) => {
+    const t = e.target as HTMLElement;
+    const name = (t as HTMLInputElement).name;
+    if (
+      name === 'attackSfxFrame' ||
+      name === 'attackShotFrame' ||
+      name === 'scale' ||
+      name === 'spriteKey' ||
+      name === 'sfxAttackVolume'
+    ) {
+      const preview = ensureUnitPreview();
+      if (!preview) return;
+      const m = readPreviewMarkersFromForm();
+      preview.setMarkers({ sfxFrame: m.sfxFrame, shotFrame: m.shotFrame });
+      preview.setDisplayScale(m.scale);
+      preview.setSfxSource(m.spriteKey, m.sfxAttackVolume);
+      if (name === 'spriteKey') void refreshUnitTestPreview();
+    }
+  });
+}
 
 const pwInput = document.getElementById('adminPassword') as HTMLInputElement;
 pwInput.value = localStorage.getItem('nw_admin_pw') || 'changeme';
@@ -207,6 +450,15 @@ function setUnitTypeFormMode(editing: UnitType | null) {
   (form.elements.namedItem('scale') as HTMLInputElement).value = String(
     editing.scale ?? 1,
   );
+  (form.elements.namedItem('sfxSpawnVolume') as HTMLInputElement).value = String(
+    editing.sfxSpawnVolume ?? 1,
+  );
+  (form.elements.namedItem('sfxAttackVolume') as HTMLInputElement).value =
+    String(editing.sfxAttackVolume ?? 1);
+  (form.elements.namedItem('attackSfxFrame') as HTMLInputElement).value =
+    editing.attackSfxFrame == null ? '' : String(editing.attackSfxFrame);
+  (form.elements.namedItem('attackShotFrame') as HTMLInputElement).value =
+    editing.attackShotFrame == null ? '' : String(editing.attackShotFrame);
   (form.elements.namedItem('isSplash') as HTMLInputElement).checked = !!editing.isSplash;
   (form.elements.namedItem('splashRadius') as HTMLInputElement).value = String(
     editing.splashRadius ?? 90,
@@ -279,7 +531,12 @@ function setUnitTypeFormMode(editing: UnitType | null) {
 
   submitBtn.textContent = 'Update unit type';
   cancelBtn.hidden = false;
-  form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const onTest = !!document
+    .getElementById('page-unit-test')
+    ?.classList.contains('active');
+  if (!onTest) {
+    form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 }
 
 function unitTypeOptionsHtml(selectedId = '') {
@@ -357,6 +614,9 @@ async function refreshUnitTypes() {
       <div style="font-size:12px;margin-top:6px">
         HP ${t.baseHp} · DMG ${t.baseAttackDamage} · Atk/s ${t.attackSpeed}<br/>
         Move ${t.moveSpeed} · Range ${t.attackRangeValue} · Detect ${t.detectionRange} · Scale ${t.scale ?? 1}<br/>
+        SFX spawn×${t.sfxSpawnVolume ?? 1} · attack×${t.sfxAttackVolume ?? 1}
+        · sfxF ${t.attackSfxFrame == null ? 'last' : t.attackSfxFrame}
+        · shotF ${t.attackShotFrame == null ? 'last' : t.attackShotFrame}<br/>
         ${t.isSplash ? `AoE r=${t.splashRadius ?? 0} dmg=${t.aoeDamage ?? 0} · ` : ''}Stun ${Math.round((t.stunChance ?? 0) * 100)}%/${t.stunDuration ?? 0}s · KB ${t.knockbackForce ?? 0}<br/>
         Resist stun ${Math.round((t.stunResist ?? 0) * 100)}% · KB ${Math.round((t.knockbackResist ?? 0) * 100)}% · LS ${Math.round((t.lifesteal ?? 0) * 100)}%<br/>
         ${t.stationary ? 'Stationary · ' : ''}${t.dealsDamage === false ? 'No atk dmg · ' : ''}${t.onDeathAoe ? 'Death AoE · ' : ''}${t.maxActivePerNation ? `Max×${t.maxActivePerNation} · ` : ''}${t.auraRadius ? `Aura r=${t.auraRadius}` : ''}${t.canMolt ? ` · Molt→${escapeHtml(unitTypes.find((u) => u.id === t.moltFormUnitTypeId)?.name ?? '?')} (${t.cocoonHp}HP/${t.cocoonDurationSec}s)` : ''}
@@ -370,6 +630,7 @@ async function refreshUnitTypes() {
       <div class="muted" style="font-size:10px;margin-top:4px">${t.id}</div>
       <div class="row" style="margin-top:8px;gap:8px">
         <button type="button" data-edit-ut="${t.id}">Edit</button>
+        <button type="button" data-test-ut="${t.id}">Test</button>
         <button type="button" data-del-ut="${t.id}" class="danger">Delete</button>
       </div>
     </div>`,
@@ -378,8 +639,26 @@ async function refreshUnitTypes() {
 
   list.querySelectorAll<HTMLButtonElement>('[data-edit-ut]').forEach((btn) => {
     btn.addEventListener('click', () => {
+      document
+        .querySelectorAll('.nav')
+        .forEach((b) => b.classList.remove('active'));
+      document
+        .querySelectorAll('.page')
+        .forEach((p) => p.classList.remove('active'));
+      document
+        .querySelector<HTMLButtonElement>('.nav[data-page="unit-types"]')
+        ?.classList.add('active');
+      document.getElementById('page-unit-types')?.classList.add('active');
+      placeUnitTypeForm('list');
       const t = unitTypes.find((u) => u.id === btn.dataset.editUt);
       if (t) setUnitTypeFormMode(t);
+    });
+  });
+
+  list.querySelectorAll<HTMLButtonElement>('[data-test-ut]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.testUt;
+      if (id) openUnitInTestTab(id);
     });
   });
 
@@ -403,6 +682,7 @@ async function refreshUnitTypes() {
   });
 
   fillUnitTypeSelects();
+  fillUnitTestSelect();
   const editingId = (
     document.querySelector(
       '#unitTypeForm [name="id"]',
@@ -535,6 +815,10 @@ document.getElementById('unitTypeForm')!.addEventListener('submit', async (e) =>
     attackRangeValue: Number(fd.get('attackRangeValue')),
     detectionRange: Number(fd.get('detectionRange')),
     scale: Number(fd.get('scale') || 1),
+    sfxSpawnVolume: Number(fd.get('sfxSpawnVolume') || 1),
+    sfxAttackVolume: Number(fd.get('sfxAttackVolume') || 1),
+    attackSfxFrame: parseOptionalFrame(fd.get('attackSfxFrame')),
+    attackShotFrame: parseOptionalFrame(fd.get('attackShotFrame')),
     isSplash: fd.get('isSplash') === 'on',
     splashRadius: Number(fd.get('splashRadius') || 0) || null,
     stunChance: Number(fd.get('stunChance') || 0),
@@ -582,8 +866,20 @@ document.getElementById('unitTypeForm')!.addEventListener('submit', async (e) =>
       });
       toast('Unit type created');
     }
-    setUnitTypeFormMode(null);
+    const onTestTab = !!document
+      .getElementById('page-unit-test')
+      ?.classList.contains('active');
     await refreshUnitTypes();
+    if (onTestTab && editingId) {
+      const updated = unitTypes.find((t) => t.id === editingId);
+      if (updated) {
+        fillUnitTestSelect(editingId);
+        setUnitTypeFormMode(updated);
+        void refreshUnitTestPreview();
+      }
+    } else {
+      setUnitTypeFormMode(null);
+    }
   } catch (err: any) {
     toast(err.message, true);
   }
@@ -677,7 +973,6 @@ document.getElementById('matchForm')!.addEventListener('submit', async (e) => {
     baseAttackRange: Number(fd.get('baseAttackRange') || 220),
     baseAttackDamage: Number(fd.get('baseAttackDamage') || 8),
     baseAttackSpeed: Number(fd.get('baseAttackSpeed') || 0.5),
-    durationMinutes: Number(fd.get('durationMinutes') || 15),
     intermissionSeconds: Number(fd.get('intermissionSeconds') || 20),
   };
   const nodeId = String(fd.get('bracketNodeId') || '').trim();
@@ -985,6 +1280,8 @@ async function refreshTiktok() {
 }
 
 async function boot() {
+  wireUnitTestControls();
+  placeUnitTypeForm('list');
   try {
     await refreshNations();
     await refreshUnitTypes();

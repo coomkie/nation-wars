@@ -14,7 +14,7 @@ sprites/bomb_carrior_explosion/   # flat VFX (catalog effects)
   frame_000.png … frame_015.png
 ```
 
-On death: Dead plays, then at ~70% of Dead the overlay plays `bomb_carrior_explosion` VFX + SFX.
+On death: Dead plays first, then after ~0.75s server applies AoE damage and overlay plays `bomb_carrior_explosion` VFX + SFX together.
 
 ## SFX
 

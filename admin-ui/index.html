@@ -12,6 +12,7 @@
       <nav>
         <button data-page="nations" class="nav active">Nations</button>
         <button data-page="unit-types" class="nav">Unit Types</button>
+        <button data-page="unit-test" class="nav">Test Unit</button>
         <button data-page="bracket" class="nav">Bracket</button>
         <button data-page="match" class="nav">Match</button>
         <button data-page="tiktok" class="nav">TikTok</button>
@@ -38,7 +39,9 @@
         <h2>Unit Types</h2>
         <p class="muted">
           Sprite URLs / anim keys are slots for future assets. Leave blank to use placeholder shapes on the overlay.
+          Use <strong>Test Unit</strong> tab to preview Attack / Running / Dead frames while editing.
         </p>
+        <div id="unitTypeFormSlot">
         <form id="unitTypeForm" class="card stack">
           <input type="hidden" name="id" value="" />
           <div class="row wrap">
@@ -57,6 +60,10 @@
             <label>Range <input name="attackRangeValue" type="number" value="40" min="1" /></label>
             <label>Detect <input name="detectionRange" type="number" value="80" min="1" /></label>
             <label>Scale <input name="scale" type="number" value="1" min="0.1" max="5" step="0.05" /></label>
+            <label title="0–2, 1 = default">Spawn SFX vol <input name="sfxSpawnVolume" type="number" value="1" min="0" max="2" step="0.05" /></label>
+            <label title="0–2, 1 = default">Attack SFX vol <input name="sfxAttackVolume" type="number" value="1" min="0" max="2" step="0.05" /></label>
+            <label title="0-based Attack frame. Blank = last frame">Attack SFX frame <input name="attackSfxFrame" type="number" min="0" max="64" step="1" placeholder="last" /></label>
+            <label title="Ranged only. 0-based Attack frame when projectile leaves. Blank = last">Shot frame <input name="attackShotFrame" type="number" min="0" max="64" step="1" placeholder="last" /></label>
           </div>
           <div class="row wrap">
             <label><input name="isSplash" type="checkbox" /> Splash / AoE</label>
@@ -129,7 +136,65 @@
             <button type="button" id="unitTypeCancelEdit" class="danger" hidden>Cancel edit</button>
           </div>
         </form>
+        </div>
         <div id="unitTypeList" class="grid"></div>
+      </section>
+
+      <section id="page-unit-test" class="page">
+        <h2>Test Unit</h2>
+        <p class="muted">
+          Preview Attack / Running / Dead (and Idle) at overlay FPS (10). Green = Attack SFX frame, yellow = Shot frame.
+          Same edit form as Unit Types — save here without starting a match.
+        </p>
+        <div class="unit-test-layout">
+          <div class="unit-test-preview card stack">
+            <div class="row wrap">
+              <label>
+                Unit
+                <select id="unitTestSelect">
+                  <option value="">— select unit type —</option>
+                </select>
+              </label>
+              <label>
+                Clip
+                <select id="unitTestClip">
+                  <option value="attack">attack</option>
+                  <option value="running">running</option>
+                  <option value="dead">dead</option>
+                  <option value="idle">idle</option>
+                  <option value="cocooning">cocooning</option>
+                  <option value="revive">revive</option>
+                </select>
+              </label>
+              <label>
+                Dir
+                <select id="unitTestDir">
+                  <option value="east">east</option>
+                  <option value="west">west</option>
+                  <option value="south">south</option>
+                  <option value="north">north</option>
+                </select>
+              </label>
+            </div>
+            <canvas id="unitTestCanvas" width="280" height="280" aria-label="Unit animation preview"></canvas>
+            <div class="row wrap" id="unitTestFrameMeta">frame —</div>
+            <div class="row wrap">
+              <button type="button" id="unitTestPlay">Play</button>
+              <button type="button" id="unitTestPause">Pause</button>
+              <button type="button" id="unitTestRestart">Restart</button>
+              <button type="button" id="unitTestPrev">◀ Frame</button>
+              <button type="button" id="unitTestNext">Frame ▶</button>
+              <label><input type="checkbox" id="unitTestLoop" /> Loop</label>
+              <label><input type="checkbox" id="unitTestSfx" checked /> Play SFX</label>
+            </div>
+            <p id="unitTestStatus" class="muted" style="margin:0"></p>
+            <p class="muted" style="margin:0;font-size:12px">
+              Tip: change <em>Attack SFX frame</em> / <em>Shot frame</em> in the form — markers update live before you save.
+              Attack SFX plays on the green marker frame (needs backend restart once for <code>/audio</code>).
+            </p>
+          </div>
+          <div id="unitTestFormSlot" class="unit-test-form"></div>
+        </div>
       </section>
 
       <section id="page-bracket" class="page">
@@ -189,10 +254,6 @@
               <input name="baseAttackSpeed" type="number" min="0" step="0.1" value="0.5" />
             </label>
           </div>
-          <label>
-            Duration (minutes)
-            <input name="durationMinutes" type="number" min="1" value="15" />
-          </label>
           <label>
             Intermission after match (seconds)
             <input name="intermissionSeconds" type="number" min="0" value="20" />

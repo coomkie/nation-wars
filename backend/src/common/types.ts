@@ -39,6 +39,12 @@ export interface MoltFormSnapshot {
   damageTakenMods: Record<string, number>;
   lifesteal: number;
   scale: number;
+  sfxSpawnVolume: number;
+  sfxAttackVolume: number;
+  /** 0-based Attack frame for SFX; null = last frame */
+  attackSfxFrame: number | null;
+  /** 0-based Attack frame for ranged shot; null = last frame */
+  attackShotFrame: number | null;
   maxActivePerNation: number;
   stationary: boolean;
   dealsDamage: boolean;
@@ -91,6 +97,14 @@ export interface Unit {
   lifesteal: number;
   /** Display size multiplier on overlay (default 1) */
   scale: number;
+  /** Spawn SFX volume multiplier (0–2) */
+  sfxSpawnVolume: number;
+  /** Attack SFX volume multiplier (0–2) */
+  sfxAttackVolume: number;
+  /** 0-based Attack frame for SFX; null = last frame */
+  attackSfxFrame: number | null;
+  /** 0-based Attack frame for ranged shot; null = last frame */
+  attackShotFrame: number | null;
   maxActivePerNation: number;
   stationary: boolean;
   dealsDamage: boolean;
@@ -121,9 +135,16 @@ export interface Unit {
   attackCooldown?: number;
   /**
    * Server-only: seconds until the current swing deals damage.
-   * Starts with the attack anim; lands on the last frame (matches overlay).
+   * Melee: end of attack period. Ranged: when projectile arrives.
    */
   attackImpactIn?: number;
+  /**
+   * Server-only: seconds until ranged projectile is released
+   * (end of attack anim). Crossbower / cannon / archer.
+   */
+  attackReleaseIn?: number;
+  /** Server-only: aim point captured at swing start for delayed release */
+  pendingAim?: { x: number; y: number } | null;
   /** Server-only: seconds remaining stunned (cannot move/attack) */
   stunRemaining?: number;
   /** Server-only: aura pulse cooldown */

@@ -28,6 +28,7 @@ export interface SpriteCatalogDto {
   folders: Record<string, string>;
   clips: Record<string, SpriteClips>;
   effects?: Record<string, string[]>;
+  projectiles?: Record<string, string>;
 }
 
 const textureCache = new Map<string, Texture>();

@@ -25,6 +25,8 @@ export interface SpriteCatalog {
   clips: Record<string, SpriteClips>;
   /** Flat VFX folders e.g. mage_explosion → frame URLs */
   effects: Record<string, string[]>;
+  /** Single-image projectiles under sprites/projectiles/ */
+  projectiles: Record<string, string>;
 }
 
 const DIR_ALIASES: Record<string, DirKey> = {
@@ -44,12 +46,21 @@ const FOLDER_TO_KEY: Record<string, string> = {
 const EFFECT_FOLDERS = new Set([
   'mage_explosion',
   'bomb_carrior_explosion',
+  'cannon_explosion',
 ]);
+
+/** Reserved root folders — not unit sheets */
+const SKIP_FOLDERS = new Set(['battlefield', 'projectiles']);
 
 @Injectable()
 export class SpritesService implements OnModuleInit {
   private readonly root = join(process.cwd(), '..', 'sprites');
-  private catalog: SpriteCatalog = { folders: {}, clips: {}, effects: {} };
+  private catalog: SpriteCatalog = {
+    folders: {},
+    clips: {},
+    effects: {},
+    projectiles: {},
+  };
 
   onModuleInit() {
     this.rebuild();
@@ -67,18 +78,29 @@ export class SpritesService implements OnModuleInit {
     const folders: Record<string, string> = {};
     const clips: Record<string, SpriteClips> = {};
     const effects: Record<string, string[]> = {};
+    const projectiles: Record<string, string> = {};
 
     if (!existsSync(this.root)) {
-      this.catalog = { folders, clips, effects };
+      this.catalog = { folders, clips, effects, projectiles };
       return this.catalog;
+    }
+
+    // Single-frame projectiles: sprites/projectiles/{key}.png
+    const projDir = join(this.root, 'projectiles');
+    if (existsSync(projDir) && statSync(projDir).isDirectory()) {
+      for (const f of readdirSync(projDir)) {
+        if (!/\.(png|webp|jpe?g)$/i.test(f)) continue;
+        const key = f.replace(/\.(png|webp|jpe?g)$/i, '').toLowerCase();
+        projectiles[key] = this.publicUrl('projectiles', f);
+      }
     }
 
     for (const entry of readdirSync(this.root)) {
       const abs = join(this.root, entry);
       if (!statSync(abs).isDirectory()) continue;
-      if (entry === 'battlefield') continue;
-
       const lower = entry.toLowerCase();
+      if (SKIP_FOLDERS.has(lower)) continue;
+
       if (EFFECT_FOLDERS.has(lower)) {
         const frames = this.scanFlatFrames(entry);
         if (frames.length) effects[lower] = frames;
@@ -90,7 +112,7 @@ export class SpritesService implements OnModuleInit {
       clips[key] = this.scanUnitOrCastle(entry);
     }
 
-    this.catalog = { folders, clips, effects };
+    this.catalog = { folders, clips, effects, projectiles };
     return this.catalog;
   }
 

@@ -1,12 +1,14 @@
 import {
   IsBoolean,
   IsIn,
+  IsInt,
   IsNumber,
   IsObject,
   IsOptional,
   IsString,
   Max,
   Min,
+  ValidateIf,
 } from 'class-validator';
 
 export class CreateUnitTypeDto {
@@ -124,6 +126,36 @@ export class CreateUnitTypeDto {
   @IsNumber()
   @Min(0.1)
   scale?: number;
+
+  /** 0–2 multiplier for spawn SFX (1 = default) */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(2)
+  sfxSpawnVolume?: number;
+
+  /** 0–2 multiplier for attack SFX (1 = default) */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(2)
+  sfxAttackVolume?: number;
+
+  /** 0-based Attack frame for SFX; null/omit = last frame */
+  @IsOptional()
+  @ValidateIf((_, v) => v != null)
+  @IsInt()
+  @Min(0)
+  @Max(64)
+  attackSfxFrame?: number | null;
+
+  /** 0-based Attack frame for ranged shot; null/omit = last frame */
+  @IsOptional()
+  @ValidateIf((_, v) => v != null)
+  @IsInt()
+  @Min(0)
+  @Max(64)
+  attackShotFrame?: number | null;
 
   @IsOptional()
   @IsNumber()
@@ -326,6 +358,36 @@ export class UpdateUnitTypeDto {
   @IsNumber()
   @Min(0.1)
   scale?: number;
+
+  /** 0–2 multiplier for spawn SFX (1 = default) */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(2)
+  sfxSpawnVolume?: number;
+
+  /** 0–2 multiplier for attack SFX (1 = default) */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(2)
+  sfxAttackVolume?: number;
+
+  /** 0-based Attack frame for SFX; null/omit = last frame */
+  @IsOptional()
+  @ValidateIf((_, v) => v != null)
+  @IsInt()
+  @Min(0)
+  @Max(64)
+  attackSfxFrame?: number | null;
+
+  /** 0-based Attack frame for ranged shot; null/omit = last frame */
+  @IsOptional()
+  @ValidateIf((_, v) => v != null)
+  @IsInt()
+  @Min(0)
+  @Max(64)
+  attackShotFrame?: number | null;
 
   @IsOptional()
   @IsNumber()

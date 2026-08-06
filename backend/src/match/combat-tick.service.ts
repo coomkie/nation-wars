@@ -2,6 +2,7 @@ import { forwardRef, Inject, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { MatchService } from './match.service';
 import { MatchGateway } from './match.gateway';
+import { SpritesService } from '../sprites/sprites.service';
 import {
   BATTLEFIELD,
   COMBAT_TICK_HZ,
@@ -21,14 +22,44 @@ export class CombatTickService {
   private interval: NodeJS.Timeout | null = null;
   private readonly dt = 1 / COMBAT_TICK_HZ;
 
+  /**
+   * Delay before on-death bomb AoE (damage + fx:explosion).
+   * Lets Dead anim play first so boom lines up with the VFX.
+   */
+  private readonly deathAoeDelaySec = 0.75;
+
+  private pendingDeathAoes: Array<{
+    remaining: number;
+    dead: Unit;
+  }> = [];
+
+  /** Ranged damage after attack-anim release + projectile travel */
+  private pendingRangedImpacts: Array<{
+    remaining: number;
+    shooterId: string;
+    targetUnitId: string | null;
+    aim: { x: number; y: number };
+    vsBase: boolean;
+  }> = [];
+
+  /** Bell ring: apply stun when Attack anim finishes */
+  private pendingBellStuns: Array<{
+    remaining: number;
+    ringerId: string;
+  }> = [];
+
   constructor(
     @Inject(forwardRef(() => MatchService))
     private readonly matchService: MatchService,
     private readonly gateway: MatchGateway,
+    private readonly sprites: SpritesService,
   ) {}
 
   start(): void {
     this.stop();
+    this.pendingDeathAoes = [];
+    this.pendingRangedImpacts = [];
+    this.pendingBellStuns = [];
     this.interval = setInterval(() => this.tick(), this.dt * 1000);
     this.logger.log(`Combat tick started @ ${COMBAT_TICK_HZ}Hz`);
   }
@@ -38,11 +69,19 @@ export class CombatTickService {
       clearInterval(this.interval);
       this.interval = null;
     }
+    this.pendingDeathAoes = [];
+    this.pendingRangedImpacts = [];
+    this.pendingBellStuns = [];
   }
 
   private tick(): void {
     const match = this.matchService.getState();
-    if (match.status !== 'active') return;
+    if (match.status !== 'active') {
+      this.pendingDeathAoes = [];
+      this.pendingRangedImpacts = [];
+      this.pendingBellStuns = [];
+      return;
+    }
 
     const moved: Array<{ unitId: string; position: { x: number; y: number } }> =
       [];
@@ -59,9 +98,19 @@ export class CombatTickService {
 
     if (!match.zones) match.zones = [];
 
+    // Resolve delayed death bombs before targeting so corpses aren't retargeted
+    this.flushPendingDeathAoes(damaged);
+
     const allUnits = [...match.nationA.units, ...match.nationB.units].filter(
-      (u) => u.state !== 'dead',
+      (u) => u.state !== 'dead' && u.hp > 0,
     );
+
+    // Release delayed ranged shots (after attack anim), then land pending impacts
+    for (const unit of allUnits) {
+      this.tickAttackRelease(unit);
+    }
+    this.flushPendingRangedImpacts(damaged, siege);
+    this.flushPendingBellStuns();
 
     // Expire zones + apply zone slows
     const now = Date.now();
@@ -104,7 +153,7 @@ export class CombatTickService {
     for (const unit of allUnits) {
       if (unit.hp <= 0) continue;
       if ((unit.stunRemaining ?? 0) > 0) {
-        unit.attackImpactIn = 0;
+        this.clearSwingTiming(unit);
         desired.set(unit.id, { x: 0, y: 0 });
         continue;
       }
@@ -117,7 +166,7 @@ export class CombatTickService {
       // Cocoon: immobile, no attack/aura; timer → emerge or stay until killed
       if (unit.state === 'cocooning') {
         desired.set(unit.id, { x: 0, y: 0 });
-        unit.attackImpactIn = 0;
+        this.clearSwingTiming(unit);
         unit.targetUnitId = null;
         unit.cocoonRemaining = (unit.cocoonRemaining ?? 0) - this.dt;
         if ((unit.cocoonRemaining ?? 0) <= 0 && unit.hp > 0) {
@@ -148,7 +197,8 @@ export class CombatTickService {
             unit.attackCooldown = (unit.attackCooldown ?? 0) - this.dt;
             if (
               (unit.attackCooldown ?? 0) <= 0 &&
-              (unit.attackImpactIn ?? 0) <= 0
+              (unit.attackImpactIn ?? 0) <= 0 &&
+              (unit.attackReleaseIn ?? 0) <= 0
             ) {
               this.beginUnitSwing(unit, target.position);
             }
@@ -230,14 +280,14 @@ export class CombatTickService {
         if (!target) {
           unit.state = 'advancing';
           unit.targetUnitId = null;
-          unit.attackImpactIn = 0;
+          this.clearSwingTiming(unit);
           continue;
         }
 
         const dist = this.dist(unit, target);
         if (dist > unit.attackRangeValue * 1.2) {
           unit.state = 'advancing';
-          unit.attackImpactIn = 0;
+          this.clearSwingTiming(unit);
           desired.set(
             unit.id,
             this.steerToward(unit, target.position.x, target.position.y),
@@ -258,7 +308,8 @@ export class CombatTickService {
         unit.attackCooldown = (unit.attackCooldown ?? 0) - this.dt;
         if (
           (unit.attackCooldown ?? 0) <= 0 &&
-          (unit.attackImpactIn ?? 0) <= 0
+          (unit.attackImpactIn ?? 0) <= 0 &&
+          (unit.attackReleaseIn ?? 0) <= 0
         ) {
           this.beginUnitSwing(unit, target.position);
         }
@@ -277,7 +328,7 @@ export class CombatTickService {
           if (dist <= unit.attackRangeValue) {
             unit.state = 'engaging';
             unit.targetUnitId = blocker.id;
-            unit.attackImpactIn = 0;
+            this.clearSwingTiming(unit);
             engaged.push({ unitId: unit.id, targetUnitId: blocker.id });
             desired.set(unit.id, { x: 0, y: 0 });
             continue;
@@ -285,7 +336,7 @@ export class CombatTickService {
           if (dist <= Math.max(unit.detectionRange, 200)) {
             unit.state = 'advancing';
             unit.targetUnitId = blocker.id;
-            unit.attackImpactIn = 0;
+            this.clearSwingTiming(unit);
             desired.set(
               unit.id,
               this.steerToward(
@@ -319,7 +370,8 @@ export class CombatTickService {
         unit.attackCooldown = (unit.attackCooldown ?? 0) - this.dt;
         if (
           (unit.attackCooldown ?? 0) <= 0 &&
-          (unit.attackImpactIn ?? 0) <= 0
+          (unit.attackImpactIn ?? 0) <= 0 &&
+          (unit.attackReleaseIn ?? 0) <= 0
         ) {
           this.beginUnitSwing(unit, { x: baseX, y: baseY });
         }
@@ -473,6 +525,16 @@ export class CombatTickService {
     }
   }
 
+  private noteHp(
+    damaged: Array<{ unitId: string; hp: number; maxHp: number }>,
+    unit: Unit,
+  ) {
+    const row = { unitId: unit.id, hp: unit.hp, maxHp: unit.maxHp };
+    const i = damaged.findIndex((d) => d.unitId === unit.id);
+    if (i >= 0) damaged[i] = row;
+    else damaged.push(row);
+  }
+
   private tickAura(
     unit: Unit,
     enemies: Unit[],
@@ -490,6 +552,17 @@ export class CombatTickService {
     if ((unit.auraCooldown ?? 0) > 0) return;
     unit.auraCooldown = Math.max(0.05, unit.auraInterval ?? 1);
 
+    // Bell: play Attack anim now; apply stun when anim ends (SFX on last frame)
+    if (unit.spriteKey === 'bell_ringer') {
+      this.gateway.emitUnitAttack(unit.id);
+      const ringDelay = Math.max(0.15, this.attackAnimDurationSec(unit));
+      this.pendingBellStuns.push({
+        remaining: ringDelay,
+        ringerId: unit.id,
+      });
+      return;
+    }
+
     const r = unit.auraRadius;
     for (const e of enemies) {
       if (this.dist(unit, e) > r) continue;
@@ -497,11 +570,10 @@ export class CombatTickService {
       if ((unit.auraDamagePerTick ?? 0) > 0) {
         const before = e.hp;
         e.hp = Math.max(0, e.hp - unit.auraDamagePerTick);
-        if (e.hp !== before) {
-          damaged.push({ unitId: e.id, hp: e.hp, maxHp: e.maxHp });
-        }
+        if (e.hp !== before) this.noteHp(damaged, e);
         if (e.hp <= 0 && e.state !== 'dead') {
           this.killUnit(e, unit, damaged);
+          this.noteHp(damaged, e); // cocoon HP overwrites lethal 0
         }
       }
       if (
@@ -516,6 +588,46 @@ export class CombatTickService {
         }
       }
     }
+  }
+
+  private flushPendingBellStuns() {
+    if (!this.pendingBellStuns.length) return;
+    const match = this.matchService.getState();
+    const keep: typeof this.pendingBellStuns = [];
+    for (const p of this.pendingBellStuns) {
+      p.remaining -= this.dt;
+      if (p.remaining > 0) {
+        keep.push(p);
+        continue;
+      }
+      const ringer = [...match.nationA.units, ...match.nationB.units].find(
+        (u) => u.id === p.ringerId && u.hp > 0 && u.state !== 'dead',
+      );
+      if (!ringer || (ringer.auraRadius ?? 0) <= 0) continue;
+      const enemies = [...match.nationA.units, ...match.nationB.units].filter(
+        (e) =>
+          e.nationId !== ringer.nationId &&
+          e.hp > 0 &&
+          e.state !== 'dead',
+      );
+      const r = ringer.auraRadius;
+      for (const e of enemies) {
+        if (this.dist(ringer, e) > r) continue;
+        if (
+          (ringer.auraStunChance ?? 0) <= 0 ||
+          (ringer.auraStunDuration ?? 0) <= 0
+        ) {
+          continue;
+        }
+        if (Math.random() >= ringer.auraStunChance) continue;
+        const resist = Math.min(1, Math.max(0, e.stunResist ?? 0));
+        const dur = ringer.auraStunDuration * (1 - resist);
+        if (dur > 0) {
+          e.stunRemaining = Math.max(e.stunRemaining ?? 0, dur);
+        }
+      }
+    }
+    this.pendingBellStuns = keep;
   }
 
   private tickTrail(unit: Unit, match: MatchState) {
@@ -589,7 +701,7 @@ export class CombatTickService {
     });
 
     best.hp = Math.max(0, best.hp - dmg);
-    damaged.push({ unitId: best.id, hp: best.hp, maxHp: best.maxHp });
+    this.noteHp(damaged, best);
     base.attackCooldown = 1 / Math.max(0.05, spd);
 
     if (best.hp <= 0) {
@@ -603,7 +715,71 @@ export class CombatTickService {
         } as Unit,
         damaged,
       );
+      this.noteHp(damaged, best);
     }
+  }
+
+  private clearSwingTiming(unit: Unit) {
+    unit.attackImpactIn = 0;
+    unit.attackReleaseIn = 0;
+    unit.pendingAim = null;
+  }
+
+  /**
+   * Overlay Attack plays at fixed 10fps. Duration = frameCount/10 (+ pad for
+   * socket/texture lag). Cooldown/period can be longer — remainder is idle hold.
+   */
+  /**
+   * Overlay attack playback FPS (must match battle-overlay attackAnimFps).
+   * Atk/s ≤ 1 → fixed 10 FPS. Atk/s > 1 → compress clip into 1/Atk/s.
+   */
+  private static readonly OVERLAY_ATTACK_FPS = 10;
+  private static readonly ATTACK_ANIM_PAD_SEC = 0.15;
+
+  private attackFrameCount(spriteKey: string | undefined): number {
+    const key = (spriteKey || '').toLowerCase();
+    if (!key) return 12;
+    const clips = this.sprites.getCatalog().clips[key];
+    const attack = clips?.attack;
+    if (!attack) return 12;
+    const n =
+      attack.east?.length ||
+      attack.west?.length ||
+      attack.south?.length ||
+      attack.north?.length ||
+      0;
+    return n > 0 ? n : 12;
+  }
+
+  private attackPlaybackFps(unit: Unit): number {
+    const frames = Math.max(1, this.attackFrameCount(unit.spriteKey));
+    const speed = Math.max(0.05, unit.attackSpeed || 1);
+    if (speed <= 1) return CombatTickService.OVERLAY_ATTACK_FPS;
+    return Math.max(
+      CombatTickService.OVERLAY_ATTACK_FPS,
+      frames * speed,
+    );
+  }
+
+  /** Full Attack clip duration at overlay playback FPS (+ pad when not sped up). */
+  private attackAnimDurationSec(unit: Unit): number {
+    const frames = Math.max(1, this.attackFrameCount(unit.spriteKey));
+    const fps = this.attackPlaybackFps(unit);
+    const pad =
+      unit.attackSpeed > 1
+        ? 0.05
+        : CombatTickService.ATTACK_ANIM_PAD_SEC;
+    return frames / fps + pad;
+  }
+
+  /** Seconds until Attack frame `index` is shown (frame 0 at t=0). */
+  private attackFrameDelaySec(unit: Unit, frameIndex: number | null): number {
+    const frames = Math.max(1, this.attackFrameCount(unit.spriteKey));
+    const last = frames - 1;
+    let f = frameIndex;
+    if (f == null || !Number.isFinite(f) || f < 0) f = last;
+    f = Math.min(last, Math.floor(f));
+    return f / this.attackPlaybackFps(unit);
   }
 
   private beginUnitSwing(
@@ -612,18 +788,218 @@ export class CombatTickService {
   ) {
     if (unit.dealsDamage === false) return;
     const period = 1 / Math.max(0.05, unit.attackSpeed);
+    const animDur = Math.max(0.15, this.attackAnimDurationSec(unit));
     this.gateway.emitUnitAttack(unit.id);
-    if (unit.attackRange === 'ranged' && unit.spriteKey !== 'mage') {
-      this.gateway.emitProjectile({
-        id: `${unit.id}-${Date.now()}`,
-        kind: 'arrow',
-        from: { ...unit.position },
-        to: { ...aim },
-        durationMs: Math.min(320, Math.round(period * 1000 * 0.45)),
-      });
+
+    // Crossbower / cannon / archer: release at attackShotFrame (default last)
+    if (this.delaysProjectileUntilAnimEnd(unit)) {
+      unit.pendingAim = { ...aim };
+      unit.attackReleaseIn = this.attackFrameDelaySec(
+        unit,
+        unit.attackShotFrame,
+      );
+      unit.attackImpactIn = 0;
+      // Next swing only after full Attack anim finishes
+      unit.attackCooldown = Math.max(period, animDur);
+      return;
     }
-    unit.attackImpactIn = period;
-    unit.attackCooldown = period;
+
+    // Melee: damage near end of Attack anim; wait full Atk period between swings
+    unit.attackImpactIn = Math.min(period, animDur);
+    unit.attackCooldown = Math.max(period, animDur);
+  }
+
+  private delaysProjectileUntilAnimEnd(unit: Unit): boolean {
+    const key = unit.spriteKey || '';
+    return (
+      unit.attackRange === 'ranged' &&
+      (key === 'crossbower' || key === 'cannon' || key === 'archer')
+    );
+  }
+
+  /** Emit projectile visual; returns travel duration in ms. */
+  private releaseRangedShot(
+    unit: Unit,
+    aim: { x: number; y: number },
+  ): number {
+    const fx = this.rangedProjectileFx(unit);
+    const from = this.muzzlePoint(unit, aim);
+    const travelMs = this.projectileTravelMs(unit, from, aim);
+    this.gateway.emitProjectile({
+      id: `${unit.id}-${Date.now()}`,
+      kind: fx.kind,
+      from,
+      to: { ...aim },
+      durationMs: travelMs,
+      spriteKey: fx.spriteKey,
+      flip: fx.flip,
+      explodeEffect: fx.explodeEffect,
+      explodeRadius: fx.explodeRadius,
+      unitId: unit.id,
+    });
+    return travelMs;
+  }
+
+  private tickAttackRelease(unit: Unit) {
+    if ((unit.attackReleaseIn ?? 0) <= 0) return;
+    unit.attackReleaseIn = (unit.attackReleaseIn ?? 0) - this.dt;
+    if ((unit.attackReleaseIn ?? 0) > 0) return;
+    unit.attackReleaseIn = 0;
+
+    const match = this.matchService.getState();
+    let aim = unit.pendingAim ?? null;
+    const vsBase = unit.state === 'attacking_base';
+    if (unit.targetUnitId) {
+      const t = [...match.nationA.units, ...match.nationB.units].find(
+        (u) => u.id === unit.targetUnitId && u.hp > 0 && u.state !== 'dead',
+      );
+      if (t) aim = { ...t.position };
+    } else if (vsBase) {
+      const isA = unit.nationId === match.nationA.nationId;
+      aim = {
+        x: isA ? BATTLEFIELD.baseBX : BATTLEFIELD.baseAX,
+        y: unit.position.y,
+      };
+    }
+    unit.pendingAim = null;
+    if (!aim) return;
+
+    const travelMs = this.releaseRangedShot(unit, aim);
+    this.pendingRangedImpacts.push({
+      remaining: travelMs / 1000,
+      shooterId: unit.id,
+      targetUnitId: unit.targetUnitId,
+      aim: { ...aim },
+      vsBase,
+    });
+  }
+
+  private flushPendingRangedImpacts(
+    damaged: Array<{ unitId: string; hp: number; maxHp: number }>,
+    siege: {
+      baseDamaged: {
+        nationId: string;
+        currentHp: number;
+        maxHp: number;
+      } | null;
+      baseDestroyedNationId: string | null;
+    },
+  ) {
+    if (!this.pendingRangedImpacts.length) return;
+    const match = this.matchService.getState();
+    const keep: typeof this.pendingRangedImpacts = [];
+
+    for (const p of this.pendingRangedImpacts) {
+      p.remaining -= this.dt;
+      if (p.remaining > 0) {
+        keep.push(p);
+        continue;
+      }
+
+      const shooter = [...match.nationA.units, ...match.nationB.units].find(
+        (u) => u.id === p.shooterId && u.hp > 0 && u.state !== 'dead',
+      );
+      if (!shooter) continue;
+
+      const isA = shooter.nationId === match.nationA.nationId;
+
+      if (p.vsBase) {
+        const base = isA ? match.baseB : match.baseA;
+        base.currentHp = Math.max(0, base.currentHp - shooter.attackDamage);
+        siege.baseDamaged = {
+          nationId: base.nationId,
+          currentHp: base.currentHp,
+          maxHp: base.maxHp,
+        };
+        if (base.currentHp <= 0) {
+          siege.baseDestroyedNationId = base.nationId;
+        }
+        continue;
+      }
+
+      const enemies = [...match.nationA.units, ...match.nationB.units].filter(
+        (e) =>
+          e.nationId !== shooter.nationId &&
+          e.hp > 0 &&
+          e.state !== 'dead',
+      );
+      let primary =
+        (p.targetUnitId
+          ? enemies.find((e) => e.id === p.targetUnitId)
+          : undefined) ?? null;
+      if (!primary || primary.hp <= 0) {
+        primary =
+          enemies
+            .map((e) => ({ e, d: this.dist(shooter, e) }))
+            .filter(({ d }) => d <= shooter.attackRangeValue * 1.35)
+            .sort((a, b) => a.d - b.d)[0]?.e ?? null;
+      }
+      if (!primary) continue;
+      this.fireUnitAttack(shooter, primary, enemies, damaged, isA, false);
+    }
+
+    this.pendingRangedImpacts = keep;
+  }
+
+  /** Front-center edge of unit toward aim (approx display half-size). */
+  private muzzlePoint(
+    unit: Unit,
+    aim: { x: number; y: number },
+  ): { x: number; y: number } {
+    const half = 32 * Math.max(0.5, unit.scale ?? 1);
+    const dx = aim.x - unit.position.x;
+    const facing = dx >= 0 ? 1 : -1;
+    return {
+      x: unit.position.x + facing * half * 0.92,
+      y: unit.position.y - half * 0.08,
+    };
+  }
+
+  private projectileTravelMs(
+    unit: Unit,
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+  ): number {
+    const dist = Math.hypot(to.x - from.x, to.y - from.y);
+    const speed = unit.spriteKey === 'cannon' ? 520 : 780;
+    const ms = Math.round((dist / speed) * 1000);
+    if (unit.spriteKey === 'cannon') return Math.max(280, Math.min(650, ms));
+    return Math.max(160, Math.min(420, ms));
+  }
+
+  /** Visual projectile for ranged units (mage uses attack-anim explosion instead). */
+  private rangedProjectileFx(unit: Unit): {
+    kind: string;
+    spriteKey?: string;
+    flip?: boolean;
+    explodeEffect?: string;
+    explodeRadius?: number;
+  } {
+    const key = unit.spriteKey || '';
+    if (key === 'crossbower') {
+      return {
+        kind: 'crossbower_arrow',
+        spriteKey: 'crossbower_arrow',
+        flip: true,
+      };
+    }
+    if (key === 'cannon') {
+      return {
+        kind: 'cannon_ball',
+        spriteKey: 'cannon_ball',
+        flip: false,
+        explodeEffect: 'cannon_explosion',
+        explodeRadius: unit.splashRadius ?? 100,
+      };
+    }
+    if (key === 'archer') {
+      return {
+        kind: 'archer_arrow',
+        spriteKey: 'archer_arrow',
+        flip: true,
+      };
+    }
+    return { kind: 'arrow' };
   }
 
   private tickSwingImpact(unit: Unit, onImpact: () => void) {
@@ -649,13 +1025,7 @@ export class CombatTickService {
       unit.attackRange === 'ranged' &&
       unit.spriteKey !== 'mage'
     ) {
-      this.gateway.emitProjectile({
-        id: `${unit.id}-${Date.now()}`,
-        kind: 'arrow',
-        from: { ...unit.position },
-        to: { ...primary.position },
-        durationMs: 300,
-      });
+      this.releaseRangedShot(unit, primary.position);
     }
 
     const victims = new Map<string, { unit: Unit; isPrimary: boolean }>();
@@ -687,11 +1057,7 @@ export class CombatTickService {
       victim.hp = Math.max(0, victim.hp - dmg);
       const dealt = before - victim.hp;
       if (dealt > 0) {
-        damaged.push({
-          unitId: victim.id,
-          hp: victim.hp,
-          maxHp: victim.maxHp,
-        });
+        this.noteHp(damaged, victim);
         if ((unit.lifesteal ?? 0) > 0) {
           unit.hp = Math.min(
             unit.maxHp,
@@ -704,12 +1070,13 @@ export class CombatTickService {
 
       if (victim.hp <= 0 && victim.state !== 'dead') {
         this.killUnit(victim, unit, damaged);
+        this.noteHp(damaged, victim); // cocoon HP overwrites lethal 0
         if (victim.id === primary.id) primaryDied = true;
       }
     }
 
     if (healed && unit.hp !== healBefore) {
-      damaged.push({ unitId: unit.id, hp: unit.hp, maxHp: unit.maxHp });
+      this.noteHp(damaged, unit);
     }
 
     if (primaryDied || primary.hp <= 0) {
@@ -724,8 +1091,8 @@ export class CombatTickService {
   }
 
   /**
-   * Mark dead, optional onDeath AoE, emit died.
-   * First lethal hit may enter cocoon instead (Molting Cicada).
+   * Mark dead, remove from match immediately (avoids match:update respawn),
+   * schedule optional on-death AoE so boom syncs with VFX.
    */
   private killUnit(
     victim: Unit,
@@ -736,6 +1103,7 @@ export class CombatTickService {
     if (this.tryEnterCocoon(victim, damaged)) return;
 
     victim.state = 'dead';
+    victim.hp = 0;
     victim.targetUnitId = null;
 
     this.gateway.emitUnitDied({
@@ -751,9 +1119,37 @@ export class CombatTickService {
       onDeathAoe: !!victim.onDeathAoe,
     });
 
-    // After unit:died so overlay can mark dying before fx:explosion attaches.
+    // Drop from arrays now so spawn → match:update cannot resurrect corpses
+    this.removeUnitFromMatch(victim);
+
     if (victim.onDeathAoe && (victim.splashRadius ?? 0) > 0) {
-      this.triggerDeathAoe(victim, damaged);
+      this.pendingDeathAoes.push({
+        remaining: this.deathAoeDelaySec,
+        dead: victim,
+      });
+    }
+  }
+
+  private removeUnitFromMatch(unit: Unit) {
+    const match = this.matchService.getState();
+    match.nationA.units = match.nationA.units.filter((u) => u.id !== unit.id);
+    match.nationB.units = match.nationB.units.filter((u) => u.id !== unit.id);
+  }
+
+  private flushPendingDeathAoes(
+    damaged: Array<{ unitId: string; hp: number; maxHp: number }>,
+  ) {
+    if (!this.pendingDeathAoes.length) return;
+    const due: Unit[] = [];
+    const keep: typeof this.pendingDeathAoes = [];
+    for (const p of this.pendingDeathAoes) {
+      p.remaining -= this.dt;
+      if (p.remaining <= 0) due.push(p.dead);
+      else keep.push(p);
+    }
+    this.pendingDeathAoes = keep;
+    for (const dead of due) {
+      this.triggerDeathAoe(dead, damaged);
     }
   }
 
@@ -775,7 +1171,7 @@ export class CombatTickService {
     victim.hasMoltUsed = true;
     victim.state = 'cocooning';
     victim.targetUnitId = null;
-    victim.attackImpactIn = 0;
+    this.clearSwingTiming(victim);
     victim.attackCooldown = 0;
     victim.stunRemaining = 0;
     victim.hp = victim.cocoonHp;
@@ -785,11 +1181,7 @@ export class CombatTickService {
       victim.spriteKey = victim.cocoonSpriteKey;
     }
 
-    damaged.push({
-      unitId: victim.id,
-      hp: victim.hp,
-      maxHp: victim.maxHp,
-    });
+    this.noteHp(damaged, victim);
     this.gateway.emitUnitState({
       unitId: victim.id,
       state: 'cocooning',
@@ -828,6 +1220,12 @@ export class CombatTickService {
     unit.damageTakenMods = { ...(snap.damageTakenMods ?? {}) };
     unit.lifesteal = snap.lifesteal;
     unit.scale = snap.scale;
+    unit.sfxSpawnVolume = snap.sfxSpawnVolume ?? 1;
+    unit.sfxAttackVolume = snap.sfxAttackVolume ?? 1;
+    unit.attackSfxFrame =
+      typeof snap.attackSfxFrame === 'number' ? snap.attackSfxFrame : null;
+    unit.attackShotFrame =
+      typeof snap.attackShotFrame === 'number' ? snap.attackShotFrame : null;
     unit.maxActivePerNation = snap.maxActivePerNation;
     unit.stationary = snap.stationary;
     unit.dealsDamage = snap.dealsDamage;
@@ -848,7 +1246,7 @@ export class CombatTickService {
     unit.state = 'advancing';
     unit.targetUnitId = null;
 
-    damaged.push({ unitId: unit.id, hp: unit.hp, maxHp: unit.maxHp });
+    this.noteHp(damaged, unit);
     this.gateway.emitUnitState({
       unitId: unit.id,
       state: 'advancing',
@@ -890,12 +1288,11 @@ export class CombatTickService {
       const applied = Math.max(0, dmg * (1 + mod));
       const before = e.hp;
       e.hp = Math.max(0, e.hp - applied);
-      if (e.hp !== before) {
-        damaged.push({ unitId: e.id, hp: e.hp, maxHp: e.maxHp });
-      }
+      if (e.hp !== before) this.noteHp(damaged, e);
       this.applyCrowdControl(dead, e, isA);
       if (e.hp <= 0 && e.state !== 'dead') {
         this.killUnit(e, dead, damaged);
+        this.noteHp(damaged, e); // cocoon HP overwrites lethal 0
       }
     }
   }

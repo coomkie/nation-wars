@@ -59,6 +59,15 @@ battle-overlay/public/audio/sfx/units/
   rat_spawn.mp3
   rat_attack.mp3
   rat_die.mp3
+  crossbower_spawn.mp3
+  crossbower_attack.mp3
+  crossbower_die.mp3
+  cannon_spawn.mp3
+  cannon_attack.mp3
+  cannon_die.mp3
+  bell_ringer_spawn.mp3
+  bell_ringer_attack.mp3
+  bell_ringer_die.mp3
 ```
 
 ## Effect SFX (explosions / VFX)
@@ -69,12 +78,13 @@ Naming matches the catalog effects key (sprite folder under `sprites/`):
 
 | File | When |
 |------|------|
-| `{effectKey}.mp3` | Catalog VFX plays (e.g. death boom) |
+| `{effectKey}.mp3` | Catalog VFX plays (e.g. death boom / cannon impact) |
 
-Example for Bomb Carrier:
+Examples:
 
 ```text
 battle-overlay/public/audio/sfx/effects/bomb_carrior_explosion.mp3
+battle-overlay/public/audio/sfx/effects/cannon_explosion.mp3
 ```
 
 Do **not** put explosion under `units/` — that folder is only `{spriteKey}_spawn|attack|die`.
@@ -111,6 +121,8 @@ battle-overlay/public/audio/
 ```
 
 Vite serves this as `/audio/...` (e.g. `/audio/sfx/units/knight_spawn.mp3`).
+
+**Music files must not be empty (0 bytes)** — Howler will skip them. If `battle_loop` is silent, check file size in `public/audio/music/battle_loop.mp3`.
 
 ## Tips
 

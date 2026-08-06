@@ -100,6 +100,28 @@ export class UnitTypeEntity {
   @Column({ type: 'float', default: 1 })
   scale: number;
 
+  /** Overlay Howler volume multiplier for spawn SFX (0–2, default 1) */
+  @Column({ type: 'float', default: 1 })
+  sfxSpawnVolume: number;
+
+  /** Overlay Howler volume multiplier for attack SFX (0–2, default 1) */
+  @Column({ type: 'float', default: 1 })
+  sfxAttackVolume: number;
+
+  /**
+   * 0-based Attack clip frame when attack SFX plays.
+   * null = last frame (default).
+   */
+  @Column({ type: 'int', nullable: true, default: null })
+  attackSfxFrame: number | null;
+
+  /**
+   * 0-based Attack clip frame when ranged projectile is released.
+   * null = last frame (default). Melee / non-projectile units ignore this.
+   */
+  @Column({ type: 'int', nullable: true, default: null })
+  attackShotFrame: number | null;
+
   /** 0 = unlimited; 1 = support spawn cap per nation */
   @Column({ type: 'int', default: 0 })
   maxActivePerNation: number;

@@ -27,12 +27,29 @@ export class MatchGateway implements OnGatewayConnection {
 
   emitMatchInit(match: MatchState) {
     this.latest = match;
-    this.server?.emit('match:init', match);
+    this.server?.emit('match:init', this.sanitizeMatch(match));
   }
 
   emitMatchUpdate(match: MatchState) {
     this.latest = match;
-    this.server?.emit('match:update', match);
+    this.server?.emit('match:update', this.sanitizeMatch(match));
+  }
+
+  /** Never broadcast corpses — prevents overlay respawn from racey match:update */
+  private sanitizeMatch(match: MatchState): MatchState {
+    const alive = (u: { state: string; hp: number }) =>
+      u.state !== 'dead' && u.hp > 0;
+    return {
+      ...match,
+      nationA: {
+        ...match.nationA,
+        units: match.nationA.units.filter(alive),
+      },
+      nationB: {
+        ...match.nationB,
+        units: match.nationB.units.filter(alive),
+      },
+    };
   }
 
   emitUnitSpawned(nationId: string, unit: Unit) {
@@ -88,10 +105,19 @@ export class MatchGateway implements OnGatewayConnection {
 
   emitProjectile(payload: {
     id: string;
-    kind: 'arrow' | 'base';
+    kind: string;
     from: { x: number; y: number };
     to: { x: number; y: number };
     durationMs: number;
+    /** Catalog projectiles key, e.g. crossbower_arrow / cannon_ball */
+    spriteKey?: string;
+    /** Horizontal flip when flying west (east-facing art) */
+    flip?: boolean;
+    /** Play catalog effect on impact */
+    explodeEffect?: string;
+    explodeRadius?: number;
+    /** Shooter — overlay refines muzzle to front-center of sprite */
+    unitId?: string;
   }) {
     this.server?.emit('fx:projectile', payload);
   }
@@ -118,7 +144,6 @@ export class MatchGateway implements OnGatewayConnection {
     matchId: string;
     nationA: string;
     nationB: string;
-    endsAt: string;
   }) {
     this.server?.emit('match:started', payload);
   }

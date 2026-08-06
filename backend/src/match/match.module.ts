@@ -9,6 +9,7 @@ import { MatchController } from './match.controller';
 import { BracketModule } from '../bracket/bracket.module';
 import { NationModule } from '../nation/nation.module';
 import { UnitTypeModule } from '../unit-type/unit-type.module';
+import { SpritesModule } from '../sprites/sprites.module';
 import { AdminAuthGuard } from '../common/admin-auth.guard';
 
 @Module({
@@ -17,6 +18,7 @@ import { AdminAuthGuard } from '../common/admin-auth.guard';
     forwardRef(() => BracketModule),
     NationModule,
     UnitTypeModule,
+    SpritesModule,
   ],
   controllers: [MatchController],
   providers: [

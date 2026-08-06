@@ -39,6 +39,13 @@ export interface UnitDto {
   spawnedAt: string;
   /** Display size multiplier (default 1) */
   scale?: number;
+  /** Spawn / attack SFX volume multipliers (0–2, default 1) */
+  sfxSpawnVolume?: number;
+  sfxAttackVolume?: number;
+  /** 0-based Attack frame for SFX; null/omit = last */
+  attackSfxFrame?: number | null;
+  /** 0-based Attack frame for ranged shot; null/omit = last */
+  attackShotFrame?: number | null;
   attackRange?: 'melee' | 'ranged';
   /** Attacks per second — drives one-shot attack anim duration */
   attackSpeed?: number;
@@ -89,6 +96,10 @@ interface UnitTypeMeta {
   spriteKey: string;
   spriteUrl: string | null;
   scale?: number;
+  sfxSpawnVolume?: number;
+  sfxAttackVolume?: number;
+  attackSfxFrame?: number | null;
+  attackShotFrame?: number | null;
   attackRange?: 'melee' | 'ranged';
   attackSpeed?: number;
 }
@@ -130,14 +141,11 @@ type UnitView = {
   attackSfxFired: boolean;
   /** True while a one-shot attack clip is playing */
   attackPlaying: boolean;
-  /** On-death AoE VFX (e.g. bomb_carrior) — fire near end of Dead clip */
-  deathBoom: {
-    effect: string;
-    x: number;
-    y: number;
-    radius: number;
-    fired: boolean;
-  } | null;
+  /**
+   * Native max(w,h) baseline for sizing (usually Attack/Running frame).
+   * Keeps Idle canvases with extra padding (cicada 92 vs attack 68) from looking smaller.
+   */
+  sizeRefNative: number;
 };
 
 type BaseView = {
@@ -161,12 +169,17 @@ type BaseView = {
 };
 
 type ProjectileFx = {
-  gfx: Graphics;
+  gfx: Graphics | null;
+  sprite: Sprite | null;
   from: { x: number; y: number };
   to: { x: number; y: number };
   age: number;
   duration: number;
   kind: string;
+  flip: boolean;
+  displaySize: number;
+  explodeEffect?: string;
+  explodeRadius?: number;
 };
 
 type ExplosionFx = {
@@ -204,6 +217,23 @@ export class BattleScene {
   private spriteCatalog: SpriteCatalogDto | null = null;
   private projectiles: ProjectileFx[] = [];
   private explosions: ExplosionFx[] = [];
+  /** Hold shot VFX until shooter Attack anim reaches last frame */
+  private pendingShotVisuals = new Map<
+    string,
+    Array<{
+      payload: {
+        kind: string;
+        from: { x: number; y: number };
+        to: { x: number; y: number };
+        spriteKey?: string;
+        explodeEffect?: string;
+        explodeRadius?: number;
+        unitId?: string;
+      };
+      duration: number;
+      flip: boolean;
+    }>
+  >();
   private timerText: Text;
   private nameAText: Text;
   private nameBText: Text;
@@ -637,7 +667,17 @@ export class BattleScene {
 
   onUnitSpawned(payload: { nationId: string; unit: UnitDto }) {
     this.spawnView(payload.unit);
-    this.audio.playUnitSpawn(payload.unit.spriteKey);
+    this.audio.preloadUnitSfx(payload.unit.spriteKey);
+    if (payload.unit.spriteKey === 'bomb_carrior') {
+      this.audio.preloadEffectSfx('bomb_carrior_explosion');
+    }
+    if (payload.unit.spriteKey === 'cannon') {
+      this.audio.preloadEffectSfx('cannon_explosion');
+    }
+    this.audio.playUnitSpawn(
+      payload.unit.spriteKey,
+      this.sfxVolumeFor(payload.unit, 'spawn'),
+    );
   }
 
   onUnitsMoved(payload: {
@@ -657,17 +697,20 @@ export class BattleScene {
     if (!view || view.dying) return;
     view.data.targetUnitId = payload.targetUnitId;
     view.data.state = 'engaging';
-    // Hold Running frame 0 between swings (same canvas as Attack — not Idle rotations)
+    // Hold Idle/rotation between swings (Attack plays at fixed FPS when swung)
     if (!view.attackPlaying) {
-      void this.setCombatHoldAnim(view);
+      void this.setUnitAnim(view, 'idle', true);
     }
   }
 
-  /** One damage swing from server — play a single attack anim lasting 1/attackSpeed. */
+  /** One damage swing from server — Attack at fixed FPS, then hold rotation. */
   onUnitAttack(payload: { unitId: string }) {
     if (!this.isMatchActive()) return;
     const view = this.unitViews.get(payload.unitId);
     if (!view || view.dying) return;
+    // Mark immediately so delayed fx:projectile waits even while textures load
+    view.attackPlaying = true;
+    view.attackSfxFired = false;
     void this.setUnitAnim(view, 'attack', false);
   }
 
@@ -693,7 +736,14 @@ export class BattleScene {
   onUnitMolted(payload: { unit: UnitDto }) {
     const u = payload.unit;
     const view = this.unitViews.get(u.id);
-    if (!view || view.dying) return;
+    if (!view) return;
+    // Cancel false death (e.g. lethal damaged before cocoon resolved)
+    if (view.dying && (u.state === 'cocooning' || u.hp > 0)) {
+      view.dying = false;
+      view.dieMs = 0;
+      view.root.alpha = 1;
+    }
+    if (view.dying) return;
     const prevKey = view.data.spriteKey;
     const prevState = view.data.state;
     const nextKey = u.spriteKey;
@@ -733,6 +783,7 @@ export class BattleScene {
       view.usesDirectional = false;
       view.animClip = null;
       view.animTextures = [];
+      view.sizeRefNative = 0;
       if (view.sprite) {
         view.sprite.destroy();
         view.sprite = null;
@@ -800,6 +851,7 @@ export class BattleScene {
     view.usesDirectional = false;
     view.animClip = null;
     view.animTextures = [];
+    view.sizeRefNative = 0;
     if (view.sprite) {
       view.sprite.destroy();
       view.sprite = null;
@@ -807,6 +859,7 @@ export class BattleScene {
     view.body.visible = true;
     void (async () => {
       await this.ensureSpriteCatalog();
+      await this.seedSizeRefFromAttack(view);
       const dir = pickDir(view.facing, 0, 0);
       let urls = resolveClipUrls(this.spriteCatalog, newKey, preferClip, dir);
       if (!urls.length) {
@@ -866,6 +919,7 @@ export class BattleScene {
   onUnitDamaged(payload: { unitId: string; hp: number; maxHp: number }) {
     const view = this.unitViews.get(payload.unitId);
     if (!view) return;
+    // Do NOT start death on hp<=0 — cicada may cocoon; wait for unit:died
     view.data.hp = payload.hp;
     view.data.maxHp = payload.maxHp;
     this.redrawHp(view);
@@ -886,23 +940,15 @@ export class BattleScene {
     const view = this.unitViews.get(payload.unitId);
     if (view) {
       view.data.state = 'dead';
+      view.data.hp = 0;
       view.dying = true;
+      view.attackPlaying = false;
+      this.pendingShotVisuals.delete(payload.unitId);
       const frames = view.animTextures.length || 6;
-      view.dieMs = Math.max(700, (frames / 10) * 1000 + 200);
+      // Bomb carriers stay visible until delayed server boom (~0.75s) + a bit
+      const baseMs = Math.max(700, (frames / 10) * 1000 + 200);
+      view.dieMs = payload.onDeathAoe ? Math.max(baseMs, 1400) : baseMs;
       void this.setUnitAnim(view, 'dead', false);
-      // Fallback if fx:explosion is delayed/missing
-      if (payload.onDeathAoe && !view.deathBoom) {
-        const key = payload.spriteKey || view.data.spriteKey;
-        if (key) {
-          view.deathBoom = {
-            effect: `${key}_explosion`,
-            x: view.root.x,
-            y: view.root.y,
-            radius: UNIT_SIZE,
-            fired: false,
-          };
-        }
-      }
     }
     this.audio.playUnitDie(view?.data.spriteKey ?? payload.spriteKey);
 
@@ -965,19 +1011,137 @@ export class BattleScene {
     from: { x: number; y: number };
     to: { x: number; y: number };
     durationMs: number;
+    spriteKey?: string;
+    flip?: boolean;
+    explodeEffect?: string;
+    explodeRadius?: number;
+    unitId?: string;
   }) {
     if (payload.kind === 'base') {
       this.audio.play('base_attack', 80);
     }
-    const gfx = new Graphics();
-    this.effectsLayer.addChild(gfx);
+    const duration = Math.max(80, payload.durationMs || 280);
+    const flip = !!payload.flip;
+    const shooter = payload.unitId
+      ? this.unitViews.get(payload.unitId)
+      : null;
+    // Hold until Attack reaches configured shot frame
+    if (shooter && shooter.attackPlaying) {
+      const n = Math.max(1, shooter.animTextures.length);
+      const shotFrame = this.resolveAttackTimingFrame(shooter, 'shot', n);
+      const reachedShot =
+        shooter.animClip === 'attack' && shooter.animIndex >= shotFrame;
+      if (!reachedShot) {
+        const list = this.pendingShotVisuals.get(payload.unitId!) ?? [];
+        list.push({
+          payload: {
+            kind: payload.kind,
+            from: { ...payload.from },
+            to: { ...payload.to },
+            spriteKey: payload.spriteKey,
+            explodeEffect: payload.explodeEffect,
+            explodeRadius: payload.explodeRadius,
+            unitId: payload.unitId,
+          },
+          duration,
+          flip,
+        });
+        this.pendingShotVisuals.set(payload.unitId!, list);
+        return;
+      }
+    }
+    const from = this.resolveMuzzle(payload);
+    void this.spawnProjectileVisual(
+      { ...payload, from },
+      duration,
+      flip,
+    );
+  }
+
+  private flushPendingShotVisuals(unitId: string) {
+    const list = this.pendingShotVisuals.get(unitId);
+    if (!list?.length) return;
+    this.pendingShotVisuals.delete(unitId);
+    for (const item of list) {
+      const from = this.resolveMuzzle(item.payload);
+      void this.spawnProjectileVisual(
+        { ...item.payload, from },
+        item.duration,
+        item.flip,
+      );
+    }
+  }
+
+  /** Front-center edge of shooter sprite (toward target). */
+  private resolveMuzzle(payload: {
+    from: { x: number; y: number };
+    to: { x: number; y: number };
+    unitId?: string;
+  }): { x: number; y: number } {
+    const view = payload.unitId
+      ? this.unitViews.get(payload.unitId)
+      : null;
+    if (!view) return { ...payload.from };
+    const half = this.unitDisplaySize(view) * 0.5;
+    const dx = payload.to.x - view.root.x;
+    const facing = dx >= 0 ? 1 : -1;
+    return {
+      x: view.root.x + facing * half * 0.92,
+      y: view.root.y - half * 0.12,
+    };
+  }
+
+  private async spawnProjectileVisual(
+    payload: {
+      kind: string;
+      from: { x: number; y: number };
+      to: { x: number; y: number };
+      spriteKey?: string;
+      explodeEffect?: string;
+      explodeRadius?: number;
+    },
+    duration: number,
+    flip: boolean,
+  ) {
+    await this.ensureSpriteCatalog();
+    const key = payload.spriteKey?.trim() || '';
+    const url = key ? this.spriteCatalog?.projectiles?.[key] : undefined;
+    const displaySize =
+      key === 'cannon_ball'
+        ? 28
+        : key === 'crossbower_arrow' || key === 'archer_arrow'
+          ? 36
+          : 32;
+    let sprite: Sprite | null = null;
+    if (url) {
+      const textures = await loadTextures(this.apiUrl, [url]);
+      if (textures.length) {
+        sprite = new Sprite(textures[0]);
+        sprite.anchor.set(0.5);
+        sprite.width = displaySize;
+        sprite.height = displaySize;
+        this.effectsLayer.addChild(sprite);
+      }
+    }
+
+    let gfx: Graphics | null = null;
+    if (!sprite) {
+      gfx = new Graphics();
+      this.effectsLayer.addChild(gfx);
+    }
+
     this.projectiles.push({
       gfx,
+      sprite,
       from: { ...payload.from },
       to: { ...payload.to },
       age: 0,
-      duration: Math.max(80, payload.durationMs || 280),
+      duration,
       kind: payload.kind,
+      flip,
+      displaySize: sprite ? displaySize : 20,
+      explodeEffect: payload.explodeEffect,
+      explodeRadius: payload.explodeRadius,
     });
   }
 
@@ -989,29 +1153,7 @@ export class BattleScene {
   }) {
     const effect = payload.effect?.trim() || '';
     if (!effect) return;
-
-    // Attach to nearest dying unit so VFX syncs with Dead anim (~70%).
-    let best: UnitView | null = null;
-    let bestDist = 48;
-    for (const view of this.unitViews.values()) {
-      if (!view.dying) continue;
-      const d = Math.hypot(view.root.x - payload.x, view.root.y - payload.y);
-      if (d < bestDist) {
-        bestDist = d;
-        best = view;
-      }
-    }
-    if (best) {
-      best.deathBoom = {
-        effect,
-        x: payload.x,
-        y: payload.y,
-        radius: payload.radius,
-        fired: best.deathBoom?.fired ?? false,
-      };
-      return;
-    }
-    // No dying unit nearby (edge case) — play immediately
+    // Server delays death AoE; play VFX/SFX as soon as fx:explosion arrives
     this.audio.playEffectSfx(effect);
     void this.spawnCatalogExplosion(
       payload.x,
@@ -1050,17 +1192,6 @@ export class BattleScene {
           view.root.alpha = Math.max(0, view.dieMs / 600);
         }
         if (view.dieMs <= 0) {
-          // Ensure death boom still plays if Dead clip was short/missing
-          if (view.deathBoom && !view.deathBoom.fired) {
-            view.deathBoom.fired = true;
-            this.audio.playEffectSfx(view.deathBoom.effect);
-            void this.spawnCatalogExplosion(
-              view.deathBoom.x,
-              view.deathBoom.y,
-              view.deathBoom.radius,
-              view.deathBoom.effect,
-            );
-          }
           view.root.destroy();
           this.unitViews.delete(id);
         }
@@ -1086,15 +1217,10 @@ export class BattleScene {
           (view.data.state === 'engaging' ||
             view.data.state === 'attacking_base');
         if (combatHold) {
-          // Keep a single Running frame — Idle/rotations often use a larger
-          // canvas with more padding, which looks like a sudden scale-down.
+          // Hold Idle/rotation between swings (Attack plays at fixed FPS)
           const dir = pickDir(view.facing, vx, vy);
-          if (
-            view.animClip !== 'running' ||
-            view.animTextures.length !== 1 ||
-            dir !== view.animDir
-          ) {
-            void this.setCombatHoldAnim(view, dir);
+          if (view.animClip !== 'idle' || dir !== view.animDir) {
+            void this.setUnitAnim(view, 'idle', true, dir);
           }
         } else if (want !== view.animClip) {
           void this.setUnitAnim(view, want, want !== 'dead');
@@ -1137,19 +1263,13 @@ export class BattleScene {
       this.timerText.text = 'CHAMPION';
       return;
     }
-    if (!this.match?.endsAt || this.match.status !== 'active') {
-      if (this.match?.status === 'idle') this.timerText.text = 'WAITING';
-      if (this.match?.status === 'ended') this.timerText.text = 'ENDED';
+    if (this.match?.status === 'active') {
+      this.timerText.text = 'LIVE';
       return;
     }
-    const remaining = Math.max(
-      0,
-      new Date(this.match.endsAt).getTime() - Date.now(),
-    );
-    const sec = Math.floor(remaining / 1000);
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    this.timerText.text = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    if (this.match?.status === 'idle') this.timerText.text = 'WAITING';
+    else if (this.match?.status === 'ended') this.timerText.text = 'ENDED';
+    else this.timerText.text = '--';
   }
 
   private async ensureNations(match: MatchState) {
@@ -1435,17 +1555,49 @@ export class BattleScene {
       const t = Math.min(1, p.age / p.duration);
       const x = p.from.x + (p.to.x - p.from.x) * t;
       const y = p.from.y + (p.to.y - p.from.y) * t;
-      const ang = Math.atan2(p.to.y - p.from.y, p.to.x - p.from.x);
-      p.gfx.clear();
-      const color = p.kind === 'base' ? 0xfbbf24 : 0xe2e8f0;
-      p.gfx
-        .moveTo(-10, 0)
-        .lineTo(10, 0)
-        .stroke({ width: 3, color, alpha: 0.95 });
-      p.gfx.position.set(x, y);
-      p.gfx.rotation = ang;
+      const dx = p.to.x - p.from.x;
+      const dy = p.to.y - p.from.y;
+      const goingWest = dx < 0;
+
+      if (p.sprite) {
+        p.sprite.position.set(x, y);
+        p.sprite.width = p.displaySize;
+        p.sprite.height = p.displaySize;
+        if (p.flip) {
+          // Art faces east — mirror for westbound; tilt with flight path
+          p.sprite.scale.x = goingWest
+            ? -Math.abs(p.sprite.scale.x)
+            : Math.abs(p.sprite.scale.x);
+          p.sprite.rotation =
+            Math.atan2(dy, Math.abs(dx) || 1) * (goingWest ? -1 : 1);
+        } else {
+          p.sprite.scale.x = Math.abs(p.sprite.scale.x);
+          p.sprite.rotation = 0;
+        }
+      } else if (p.gfx) {
+        const ang = Math.atan2(dy, dx);
+        p.gfx.clear();
+        const color = p.kind === 'base' ? 0xfbbf24 : 0xe2e8f0;
+        p.gfx
+          .moveTo(-10, 0)
+          .lineTo(10, 0)
+          .stroke({ width: 3, color, alpha: 0.95 });
+        p.gfx.position.set(x, y);
+        p.gfx.rotation = ang;
+      }
+
       if (t >= 1) {
-        p.gfx.destroy();
+        if (p.explodeEffect) {
+          this.audio.playEffectSfx(p.explodeEffect);
+          void this.spawnCatalogExplosion(
+            p.to.x,
+            p.to.y,
+            p.explodeRadius ?? 80,
+            p.explodeEffect,
+          );
+        }
+        p.sprite?.destroy();
+        p.gfx?.destroy();
         this.projectiles.splice(i, 1);
       }
     }
@@ -1490,40 +1642,51 @@ export class BattleScene {
   }
 
   private syncUnits(match: MatchState) {
-    const all = [...(match.nationA?.units ?? []), ...(match.nationB?.units ?? [])];
+    const all = [...(match.nationA?.units ?? []), ...(match.nationB?.units ?? [])]
+      .filter((u) => u.state !== 'dead' && u.hp > 0);
     const ids = new Set(all.map((u) => u.id));
     for (const u of all) {
       const existing = this.unitViews.get(u.id);
-      if (!existing) this.spawnView(u);
-      else {
-        const prevState = existing.data.state;
-        const prevScale = existing.data.scale;
-        existing.data = u;
-        existing.target = { ...u.position };
-        this.redrawHp(existing);
-        if (
-          existing.usesDirectional &&
-          (prevScale !== u.scale || u.scale == null)
-        ) {
-          this.applyUnitSpriteSize(existing);
-        }
-        if (!existing.usesDirectional) this.redrawBody(existing);
-        else if (prevState !== u.state) {
-          if (existing.attackPlaying && u.state !== 'dead') {
-            /* keep one-shot attack */
-          } else {
-            void this.setUnitAnim(
-              existing,
-              clipForUnitState(u.state, true),
-              u.state !== 'dead',
-            );
-          }
+      if (!existing) {
+        this.spawnView(u);
+        continue;
+      }
+      // Alive on server but dying on client (false death / cocoon race) → revive
+      if (existing.dying && u.hp > 0 && u.state !== 'dead') {
+        existing.dying = false;
+        existing.dieMs = 0;
+        existing.root.alpha = 1;
+      }
+      if (existing.dying) continue;
+      const prevState = existing.data.state;
+      const prevScale = existing.data.scale;
+      existing.data = u;
+      existing.target = { ...u.position };
+      this.redrawHp(existing);
+      if (
+        existing.usesDirectional &&
+        (prevScale !== u.scale || u.scale == null)
+      ) {
+        this.applyUnitSpriteSize(existing);
+      }
+      if (!existing.usesDirectional) this.redrawBody(existing);
+      else if (prevState !== u.state) {
+        if (existing.attackPlaying && u.state !== 'dead') {
+          /* keep one-shot attack */
+        } else {
+          void this.setUnitAnim(
+            existing,
+            clipForUnitState(u.state, true),
+            u.state !== 'dead',
+          );
         }
       }
     }
     for (const [id, view] of this.unitViews) {
       if (!ids.has(id) && !view.dying) {
         view.dying = true;
+        view.data.hp = 0;
+        view.data.state = 'dead';
         view.dieMs = 400;
         void this.setUnitAnim(view, 'dead', false);
       }
@@ -1532,6 +1695,7 @@ export class BattleScene {
 
   private spawnView(unit: UnitDto) {
     if (this.unitViews.has(unit.id)) return;
+    if (unit.state === 'dead' || unit.hp <= 0) return;
     const root = new Container();
     const visual = new Container();
     const body = new Graphics();
@@ -1576,7 +1740,7 @@ export class BattleScene {
       mageBoomFired: false,
       attackSfxFired: false,
       attackPlaying: false,
-      deathBoom: null,
+      sizeRefNative: 0,
     };
     this.redrawBody(view);
     this.redrawHp(view);
@@ -1638,10 +1802,19 @@ export class BattleScene {
 
   private applyUnitSpriteSize(view: UnitView) {
     if (!view.sprite) return;
-    const size = this.unitDisplaySize(view);
-    view.sprite.width = size;
-    view.sprite.height = size;
-    view.label.position.set(0, size * 0.25 + 4);
+    const target = this.unitDisplaySize(view);
+    const tex = view.sprite.texture;
+    const tw = Math.max(1, tex.width);
+    const th = Math.max(1, tex.height);
+    const native = Math.max(tw, th);
+    // Prefer Attack/Running baseline so Idle sheets with extra padding
+    // (cicada idle 92 vs attack 68) keep the same on-screen character size.
+    const ref =
+      view.sizeRefNative > 0 ? view.sizeRefNative : native;
+    const mul = target / ref;
+    view.sprite.width = tw * mul;
+    view.sprite.height = th * mul;
+    view.label.position.set(0, Math.max(tw, th) * mul * 0.25 + 4);
     this.redrawHp(view);
   }
 
@@ -1653,6 +1826,7 @@ export class BattleScene {
       (key === 'cavalry' && !!this.spriteCatalog?.clips.cavalry);
     if (has) {
       view.usesDirectional = true;
+      await this.seedSizeRefFromAttack(view);
       await this.setUnitAnim(
         view,
         clipForUnitState(view.data.state, true),
@@ -1661,6 +1835,21 @@ export class BattleScene {
       return;
     }
     await this.tryAttachSprite(view);
+  }
+
+  /** Prefer Attack native size as scale baseline (fixes cicada Idle 92 vs Attack 68). */
+  private async seedSizeRefFromAttack(view: UnitView) {
+    if (view.sizeRefNative > 0) return;
+    const urls = resolveClipUrls(
+      this.spriteCatalog,
+      view.data.spriteKey || 'infantry',
+      'attack',
+      'east',
+    );
+    if (!urls.length) return;
+    const textures = await loadTextures(this.apiUrl, urls);
+    const t = textures[0];
+    if (t) view.sizeRefNative = Math.max(t.width, t.height);
   }
 
   private async setUnitAnim(
@@ -1681,6 +1870,11 @@ export class BattleScene {
     );
     const textures = await loadTextures(this.apiUrl, urls);
     if (!textures.length) {
+      if (clip === 'attack') {
+        // Don't leave attackPlaying stuck — release any queued shot
+        view.attackPlaying = false;
+        this.flushPendingShotVisuals(view.data.id);
+      }
       if (clip === 'cocooning' || clip === 'revive' || clip === 'running') {
         const idleUrls = resolveClipUrls(
           this.spriteCatalog,
@@ -1718,11 +1912,18 @@ export class BattleScene {
     return 1;
   }
 
-  /** One full attack clip lasts exactly 1/attackSpeed seconds. */
+  /**
+   * Atk/s ≤ 1: fixed 10 FPS (hold Idle for leftover period).
+   * Atk/s > 1: speed up so the full Attack clip fits in 1/Atk/s.
+   */
+  private static readonly ATTACK_ANIM_FPS = 10;
+
   private attackAnimFps(frameCount: number, attackSpeed: number): number {
     const n = Math.max(1, frameCount);
-    const as = Math.max(0.05, attackSpeed);
-    return Math.min(60, Math.max(2, n * as));
+    const speed = Math.max(0.05, attackSpeed);
+    if (speed <= 1) return BattleScene.ATTACK_ANIM_FPS;
+    // duration = n / fps = 1/speed  →  fps = n * speed
+    return Math.max(BattleScene.ATTACK_ANIM_FPS, n * speed);
   }
 
   private applyUnitTextures(
@@ -1750,6 +1951,17 @@ export class BattleScene {
       view.attackPlaying = false;
     }
 
+    const tw = textures[0]?.width ?? 0;
+    const th = textures[0]?.height ?? 0;
+    const native = Math.max(tw, th);
+    if (native > 0) {
+      if (clip === 'attack' || clip === 'running') {
+        view.sizeRefNative = native;
+      } else if (view.sizeRefNative <= 0) {
+        view.sizeRefNative = native;
+      }
+    }
+
     if (!view.sprite) {
       const spr = new Sprite(textures[0]);
       spr.anchor.set(0.5, 0.85);
@@ -1761,6 +1973,10 @@ export class BattleScene {
     view.sprite.visible = true;
     view.body.visible = false;
     this.applyUnitSpriteSize(view);
+    if (clip === 'attack') {
+      this.maybePlayAttackSfx(view);
+      this.maybeReleaseAttackShot(view);
+    }
   }
 
   private advanceUnitAnim(view: UnitView, deltaMs: number) {
@@ -1770,10 +1986,10 @@ export class BattleScene {
       this.applyUnitSpriteSize(view);
       if (view.animClip === 'attack' && view.attackPlaying) {
         this.maybePlayAttackSfx(view);
-        // Single-frame: hold for full attack interval then return to idle
+        this.maybeReleaseAttackShot(view);
+        // Single-frame attack: brief flash then hold rotation until next swing
         view.animAcc += deltaMs;
-        const holdMs = 1000 / Math.max(0.05, this.resolveAttackSpeed(view));
-        if (view.animAcc >= holdMs) {
+        if (view.animAcc >= 120) {
           this.finishAttackAnim(view);
         }
       }
@@ -1800,13 +2016,14 @@ export class BattleScene {
       view.sprite.texture = view.animTextures[view.animIndex];
       this.applyUnitSpriteSize(view);
       this.maybePlayAttackSfx(view);
+      this.maybeReleaseAttackShot(view);
       this.maybeFireMageExplosion(view);
-      this.maybeFireDeathExplosion(view);
     }
   }
 
   private finishAttackAnim(view: UnitView) {
     view.attackPlaying = false;
+    this.flushPendingShotVisuals(view.data.id);
     if (view.dying) return;
     if (!this.isMatchActive()) {
       void this.setUnitAnim(view, 'idle', true);
@@ -1816,7 +2033,8 @@ export class BattleScene {
       view.data.state === 'engaging' ||
       view.data.state === 'attacking_base'
     ) {
-      void this.setCombatHoldAnim(view);
+      // Hold Idle/rotation until next unit:attack (do not stretch Attack FPS)
+      void this.setUnitAnim(view, 'idle', true);
       return;
     }
     const want = clipForUnitState(view.data.state, false);
@@ -1824,37 +2042,71 @@ export class BattleScene {
   }
 
   /**
-   * Static combat pose: first Running frame (matches Attack canvas size).
-   * Avoids Idle/rotations which are often larger + more padded.
+   * Resolve 0-based Attack timing frame from unit / unit-type.
+   * null / omit → last frame.
    */
-  private async setCombatHoldAnim(view: UnitView, dirOverride?: DirKey) {
-    await this.ensureSpriteCatalog();
-    const dir =
-      dirOverride ??
-      pickDir(view.facing, view.target.x - view.root.x, 0);
-    const key = view.data.spriteKey || 'infantry';
-    let urls = resolveClipUrls(this.spriteCatalog, key, 'running', dir);
-    let textures = await loadTextures(this.apiUrl, urls);
-    if (!textures.length) {
-      urls = resolveClipUrls(this.spriteCatalog, key, 'attack', dir);
-      textures = await loadTextures(this.apiUrl, urls);
-    }
-    if (!textures.length) {
-      void this.setUnitAnim(view, 'idle', true, dir);
-      return;
-    }
-    this.applyUnitTextures(view, 'running', dir, [textures[0]], 1, true);
+  private resolveAttackTimingFrame(
+    view: UnitView,
+    kind: 'sfx' | 'shot',
+    frameCount: number,
+  ): number {
+    const last = Math.max(0, frameCount - 1);
+    const fromUnit =
+      kind === 'sfx' ? view.data.attackSfxFrame : view.data.attackShotFrame;
+    const type = this.unitTypes.get(view.data.unitTypeId);
+    const fromType =
+      kind === 'sfx' ? type?.attackSfxFrame : type?.attackShotFrame;
+    let f =
+      typeof fromUnit === 'number'
+        ? fromUnit
+        : typeof fromType === 'number'
+          ? fromType
+          : null;
+    if (f == null || !Number.isFinite(f) || f < 0) return last;
+    return Math.min(last, Math.floor(f));
   }
 
-  /** Play unit attack SFX on the last frame of each attack anim cycle. */
+  /** Play unit attack SFX on configured Attack frame (default last). */
   private maybePlayAttackSfx(view: UnitView) {
     if (view.animClip !== 'attack' || view.attackSfxFired) return;
     const n = view.animTextures.length;
     if (n === 0) return;
-    const impactFrame = n - 1;
-    if (view.animIndex < impactFrame) return;
+    const sfxFrame = this.resolveAttackTimingFrame(view, 'sfx', n);
+    if (view.animIndex < sfxFrame) return;
     view.attackSfxFired = true;
-    this.audio.playAttack(this.attackKindFor(view), view.data.spriteKey);
+    this.audio.playAttack(
+      this.attackKindFor(view),
+      view.data.spriteKey,
+      this.sfxVolumeFor(view.data, 'attack'),
+    );
+  }
+
+  /** Release queued projectile visual on configured shot frame (default last). */
+  private maybeReleaseAttackShot(view: UnitView) {
+    if (view.animClip !== 'attack' || !view.attackPlaying) return;
+    const n = view.animTextures.length;
+    if (n === 0) return;
+    const shotFrame = this.resolveAttackTimingFrame(view, 'shot', n);
+    if (view.animIndex < shotFrame) return;
+    this.flushPendingShotVisuals(view.data.id);
+  }
+
+  private sfxVolumeFor(
+    unit: UnitDto,
+    kind: 'spawn' | 'attack',
+  ): number {
+    const fromUnit =
+      kind === 'spawn' ? unit.sfxSpawnVolume : unit.sfxAttackVolume;
+    if (typeof fromUnit === 'number' && Number.isFinite(fromUnit)) {
+      return fromUnit;
+    }
+    const type = this.unitTypes.get(unit.unitTypeId);
+    const fromType =
+      kind === 'spawn' ? type?.sfxSpawnVolume : type?.sfxAttackVolume;
+    if (typeof fromType === 'number' && Number.isFinite(fromType)) {
+      return fromType;
+    }
+    return 1;
   }
 
   private maybeFireMageExplosion(view: UnitView) {
@@ -1864,25 +2116,6 @@ export class BattleScene {
     if (view.animIndex < last) return;
     view.mageBoomFired = true;
     void this.spawnMageExplosion(view);
-  }
-
-  /** Fire on-death catalog explosion near end of Dead clip (~70%). */
-  private maybeFireDeathExplosion(view: UnitView) {
-    const boom = view.deathBoom;
-    if (!boom || boom.fired) return;
-    if (view.animClip !== 'dead') return;
-    const n = view.animTextures.length;
-    if (n === 0) {
-      boom.fired = true;
-      this.audio.playEffectSfx(boom.effect);
-      void this.spawnCatalogExplosion(boom.x, boom.y, boom.radius, boom.effect);
-      return;
-    }
-    const fireAt = Math.max(0, Math.floor((n - 1) * 0.7));
-    if (view.animIndex < fireAt) return;
-    boom.fired = true;
-    this.audio.playEffectSfx(boom.effect);
-    void this.spawnCatalogExplosion(boom.x, boom.y, boom.radius, boom.effect);
   }
 
   private async spawnMageExplosion(caster: UnitView) {

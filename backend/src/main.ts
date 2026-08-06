@@ -19,6 +19,11 @@ async function bootstrap() {
   app.useStaticAssets(join(process.cwd(), '..', 'sprites'), {
     prefix: '/sprites',
   });
+  // Unit/effect SFX shared with battle-overlay (admin Test Unit preview)
+  app.useStaticAssets(
+    join(process.cwd(), '..', 'battle-overlay', 'public', 'audio'),
+    { prefix: '/audio' },
+  );
 
   const port = Number(process.env.PORT) || 3000;
   await app.listen(port);
